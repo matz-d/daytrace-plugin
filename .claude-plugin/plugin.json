@@ -1,6 +1,6 @@
 {
   "name": "daytrace",
-  "description": "ローカルログ（Git, Claude/Codex会話, Chrome履歴, ファイル変更）を集約し、日報・スキル提案・投稿下書きを自動生成する plugin。",
+  "description": "ローカル証跡から観測→抽出→適用を自律的に回す自己改善エージェント。Date-first/Scope-first の直交射影で日報・投稿下書き・スキル提案を生成し、Carry-Forward State Machine でユーザー判断を次回の学習に変える。外部通信ゼロ・Python stdlib のみ。",
   "version": "0.1.0",
   "author": {
     "name": "matz-d"
