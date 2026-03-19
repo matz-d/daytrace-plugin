@@ -433,7 +433,7 @@ def collect_timeline(source_results: list[dict[str, Any]]) -> list[dict[str, Any
     for result in source_results:
         if result["status"] == "success":
             timeline.extend(result["events"])
-    timeline.sort(key=lambda event: event["timestamp"])
+    timeline.sort(key=lambda event: ensure_datetime(event["timestamp"]))
     return timeline
 
 

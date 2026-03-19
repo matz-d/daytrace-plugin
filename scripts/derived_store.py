@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from aggregate_core import DEFAULT_GROUP_WINDOW_MINUTES, DEFAULT_MAX_SPAN_MINUTES, build_groups
-from common import isoformat_or_now, parse_datetime
+from common import ensure_datetime, isoformat_or_now, parse_datetime
 from store import bootstrap_store, canonical_json, connect_store, resolve_store_path, stable_hash
 
 
-ACTIVITY_DERIVATION_VERSION = "activities-v2"
+ACTIVITY_DERIVATION_VERSION = "activities-v3"
 PATTERN_DERIVATION_VERSION = "skill-miner-candidate-v1"
 
 
@@ -672,7 +672,7 @@ def derive_activities_from_observations(
         event["_observation_fingerprint"] = observation["event_fingerprint"]
         timeline.append(event)
 
-    timeline.sort(key=lambda event: event["timestamp"])
+    timeline.sort(key=lambda event: ensure_datetime(event["timestamp"]))
     input_fingerprint = compute_activities_input_fingerprint(
         observations,
         group_window_minutes=group_window_minutes,
