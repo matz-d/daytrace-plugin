@@ -1,0 +1,62 @@
+[
+  {
+    "name": "git-history",
+    "command": "python3 scripts/git_history.py",
+    "required": false,
+    "timeout_sec": 10,
+    "platforms": ["darwin", "linux"],
+    "supports_date_range": true,
+    "supports_all_sessions": false,
+    "scope_mode": "workspace",
+    "prerequisites": [{"type": "git_repo"}],
+    "confidence_category": "git"
+  },
+  {
+    "name": "claude-history",
+    "command": "python3 scripts/claude_history.py",
+    "required": false,
+    "timeout_sec": 30,
+    "platforms": ["darwin", "linux"],
+    "supports_date_range": true,
+    "supports_all_sessions": true,
+    "scope_mode": "all-day",
+    "prerequisites": [{"type": "path_exists", "path": "~/.claude/projects"}],
+    "confidence_category": "ai_history"
+  },
+  {
+    "name": "codex-history",
+    "command": "python3 scripts/codex_history.py",
+    "required": false,
+    "timeout_sec": 30,
+    "platforms": ["darwin", "linux"],
+    "supports_date_range": true,
+    "supports_all_sessions": true,
+    "scope_mode": "all-day",
+    "prerequisites": [{"type": "all_paths_exist", "paths": ["~/.codex/history.jsonl", "~/.codex/sessions"]}],
+    "confidence_category": "ai_history"
+  },
+  {
+    "name": "chrome-history",
+    "command": "python3 scripts/chrome_history.py",
+    "required": false,
+    "timeout_sec": 20,
+    "platforms": ["darwin", "linux"],
+    "supports_date_range": true,
+    "supports_all_sessions": false,
+    "scope_mode": "all-day",
+    "prerequisites": [{"type": "chrome_history_db"}],
+    "confidence_category": "browser"
+  },
+  {
+    "name": "workspace-file-activity",
+    "command": "python3 scripts/workspace_file_activity.py",
+    "required": false,
+    "timeout_sec": 10,
+    "platforms": ["darwin", "linux"],
+    "supports_date_range": true,
+    "supports_all_sessions": false,
+    "scope_mode": "workspace",
+    "prerequisites": [{"type": "git_repo"}],
+    "confidence_category": "file_activity"
+  }
+]

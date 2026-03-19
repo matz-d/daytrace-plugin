@@ -1,0 +1,12 @@
+{
+  "name": "daytrace",
+  "description": "ローカルログ（Git, Claude/Codex会話, Chrome履歴, ファイル変更）を集約し、日報・スキル提案・投稿下書きを自動生成する plugin。",
+  "version": "0.1.0",
+  "author": {
+    "name": "matz-d"
+  },
+  "homepage": "https://github.com/matz-d/daytrace-plugin",
+  "repository": "https://github.com/matz-d/daytrace-plugin",
+  "license": "MIT",
+  "keywords": ["daily-report", "activity-trace", "skill-mining", "post-draft"]
+}
