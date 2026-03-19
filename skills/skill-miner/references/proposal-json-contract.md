@@ -50,16 +50,31 @@
   "confidence": "strong | medium",
   "proposal_ready": true,
   "triage_status": "ready",
+  "origin_hint": "human | mixed | parent_ai | unknown | \"\"",
+  "user_signal_strength": "high | medium | low | unknown",
+  "contamination_signals": ["assistant_fallback", "summary_fallback", "sidechain"],
   "evidence_items": [
     { "session_ref": "...", "timestamp": "ISO8601", "source": "...", "summary": "..." }
   ],
-  "support": { "total_packets": 5, "claude_packets": 3, "codex_packets": 2 },
+  "support": {
+    "total_packets": 5,
+    "claude_packets": 3,
+    "codex_packets": 2,
+    "contaminated_packets": 0
+  },
 
   "skill_scaffold_context":  {/* skill candidates only */},
   "skill_creator_handoff":   {/* skill candidates only */},
   "next_step_stub":          {/* hook/agent candidates only */}
 }
 ```
+
+補足:
+
+- `origin_hint` は packet 群の由来ヒント。`human` は通常の人間主導パターン、`parent_ai` は sidechain/subagent 起点、`mixed` は人間起点と内部足場が混在、`unknown` は補助 signal が弱く判定保留、空文字は legacy packet 由来で未観測を意味する
+- `user_signal_strength` は `primary_intent` がどれだけ user 側から復元できたかのヒント。`low` は assistant fallback や summary fallback に依存した candidate を示す
+- `contamination_signals` は user-facing proposal を慎重に扱うべき補助 signal。現時点の代表値は `assistant_fallback`, `summary_fallback`, `sidechain`
+- `support.contaminated_packets` は contamination signal を持つ packet 数。0 でない場合は `ready` に上げる前に signal を確認する
 
 ### `skill_scaffold_context` (suggested_kind=skill)
 
@@ -178,6 +193,7 @@ agent:
 
 - `input_fidelity` を正とし、近似入力判定は `input_fidelity == "approximate"` で行う。
 - adaptive window の有効/拡張判定は `adaptive_window` 配下のみを参照する。
+- contamination signal は `observation_contract` には入れず、candidate object 側で扱う。汚染疑いの判断は `origin_hint`, `user_signal_strength`, `contamination_signals`, `support.contaminated_packets` を組み合わせて行う。
 
 ## Learning Feedback
 

@@ -59,6 +59,7 @@ from skill_miner_common import (
     overlap_score,
     packet_sort_key,
     packet_user_rule_hints,
+    parse_session_ref,
     recent_packet_count,
     skill_miner_packet_is_v2,
     stable_block_keys,
@@ -346,6 +347,70 @@ def _tag_fidelity(packet: dict[str, Any], fidelity: str) -> dict[str, Any]:
     return packet
 
 
+def _keep_claude_packet(packet: dict[str, Any]) -> bool:
+    if bool(packet.get("is_sidechain")):
+        return False
+    return str(packet.get("primary_intent_source") or "").strip() != PRIMARY_INTENT_SOURCE_SUMMARY
+
+
+def _combine_origin_hints(origin_hints: list[str]) -> str:
+    normalized = [str(value).strip() for value in origin_hints if str(value).strip()]
+    distinct = set(normalized)
+    if not distinct:
+        return ""
+    if len(distinct) == 1:
+        return next(iter(distinct))
+    if "human" in distinct:
+        return "mixed"
+    if "parent_ai" in distinct:
+        return "parent_ai"
+    return "unknown"
+
+
+def _combine_user_signal_strength(levels: list[str]) -> str:
+    normalized = {str(value).strip() for value in levels if str(value).strip()}
+    if not normalized:
+        return "unknown"
+    if "low" in normalized:
+        return "low"
+    if "medium" in normalized:
+        return "medium"
+    if "unknown" in normalized:
+        return "unknown"
+    return "high"
+
+
+def _claude_store_session_key(observation: dict[str, Any]) -> str:
+    details = observation.get("details", {})
+    if not isinstance(details, dict):
+        details = {}
+
+    file_path = str(details.get("file_path") or "").strip()
+    if file_path:
+        return f"path:{file_path}"
+
+    session_ref = str(details.get("session_ref") or "").strip()
+    if session_ref.startswith("claude:"):
+        try:
+            _kind, ref_path, _epoch = parse_session_ref(session_ref)
+        except (TypeError, ValueError):
+            ref_path = ""
+        if ref_path:
+            return f"path:{ref_path}"
+
+    session_id = str(details.get("session_id") or "").strip()
+    if session_id:
+        return f"session:{session_id}"
+
+    packet_id = str(details.get("packet_id") or "").strip()
+    if packet_id.startswith("claude:"):
+        packet_prefix, _separator, _packet_index = packet_id.rpartition(":")
+        if packet_prefix:
+            return f"packet:{packet_prefix}"
+
+    return str(observation.get("event_fingerprint") or packet_id or id(observation))
+
+
 def read_claude_packets(root: Path, workspace: Path | None, gap_hours: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not root.exists():
         return [], source_status(CLAUDE_SOURCE, "skipped", reason="not_found", root=str(root))
@@ -377,10 +442,12 @@ def read_claude_packets(root: Path, workspace: Path | None, gap_hours: int) -> t
                             tools=list(logical_packet.get("tools", [])),
                             tool_call_details=list(logical_packet.get("tool_calls", [])),
                             referenced_files=list(logical_packet.get("referenced_files", [])),
+                            is_sidechain=bool(logical_packet.get("is_sidechain")),
                         ),
                         FIDELITY_ORIGINAL,
                     )
                 )
+        packets = [packet for packet in packets if _keep_claude_packet(packet)]
         return packets, source_status(CLAUDE_SOURCE, "success", packets_count=len(packets))
     except PermissionError as exc:
         return [], source_status(CLAUDE_SOURCE, "skipped", reason="permission_denied", message=str(exc), root=str(root))
@@ -685,6 +752,7 @@ def _packet_from_claude_observation(observation: dict[str, Any]) -> list[dict[st
                         tools=tools,
                         tool_call_details=[detail for detail in tool_call_details if isinstance(detail, dict)] if isinstance(tool_call_details, list) else [],
                         user_message_source=user_message_source,
+                        is_sidechain=bool(logical_packet.get("is_sidechain")),
                     ),
                     FIDELITY_APPROXIMATE,
                 )
@@ -730,6 +798,7 @@ def _packet_from_claude_observation(observation: dict[str, Any]) -> list[dict[st
                 assistant_messages=assistant_messages,
                 tools=[],
                 user_message_source=user_message_source,
+                is_sidechain=bool(details.get("is_sidechain")),
             ),
             FIDELITY_APPROXIMATE,
         )
@@ -889,7 +958,26 @@ def read_store_packets(
             packet_observations_by_source[source_name].append(observation)
 
     fallback_sources = {CLAUDE_SOURCE, CODEX_SOURCE}
-    for source_name in (CLAUDE_SOURCE, CODEX_SOURCE):
+    claude_fallback_session_keys: set[str] = set()
+    claude_packet_observations = packet_observations_by_source.get(CLAUDE_SOURCE, [])
+    if claude_packet_observations:
+        claude_packets_by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for observation in claude_packet_observations:
+            session_key = _claude_store_session_key(observation)
+            stored_packet = _packet_from_packet_observation(observation)
+            if stored_packet is None or not _keep_claude_packet(stored_packet):
+                claude_fallback_session_keys.add(session_key)
+                continue
+            claude_packets_by_session[session_key].append(stored_packet)
+        for session_key, source_packets in claude_packets_by_session.items():
+            if session_key in claude_fallback_session_keys:
+                continue
+            packets.extend(source_packets)
+            claude_packet_count += len(source_packets)
+        if not claude_fallback_session_keys:
+            fallback_sources.discard(CLAUDE_SOURCE)
+
+    for source_name in (CODEX_SOURCE,):
         source_observations = packet_observations_by_source.get(source_name, [])
         if not source_observations:
             continue
@@ -905,10 +993,7 @@ def read_store_packets(
             continue
         packets.extend(source_packets)
         fallback_sources.discard(source_name)
-        if source_name == CLAUDE_SOURCE:
-            claude_packet_count += len(source_packets)
-        else:
-            codex_packet_count += len(source_packets)
+        codex_packet_count += len(source_packets)
 
     if fallback_sources:
         observations = get_observations(
@@ -922,20 +1007,22 @@ def read_store_packets(
         deduped_observations = _dedupe_observations(observations)
         claude_observations = [observation for observation in deduped_observations if observation["source_name"] == CLAUDE_SOURCE]
         codex_observations = [observation for observation in deduped_observations if observation["source_name"] == CODEX_SOURCE]
+        if claude_fallback_session_keys:
+            claude_observations = [
+                observation
+                for observation in claude_observations
+                if _claude_store_session_key(observation) in claude_fallback_session_keys
+            ]
 
         claude_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for observation in claude_observations:
-            details = observation.get("details", {})
-            file_key = None
-            if isinstance(details, dict):
-                file_key = str(details.get("file_path") or details.get("session_id") or "").strip() or None
-            claude_groups[file_key or str(observation["event_fingerprint"])].append(observation)
+            claude_groups[_claude_store_session_key(observation)].append(observation)
         for group in claude_groups.values():
             preferred_observation = next(
                 (item for item in group if str(item.get("event_type") or "") == "session_summary"),
                 group[-1],
             )
-            claude_packets = _packet_from_claude_observation(preferred_observation)
+            claude_packets = [packet for packet in _packet_from_claude_observation(preferred_observation) if _keep_claude_packet(packet)]
             packets.extend(claude_packets)
             claude_packet_count += len(claude_packets)
 
@@ -1629,6 +1716,7 @@ def cluster_packets(packets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
             "total_tool_calls": sum(int(packet.get("support", {}).get("tool_call_count", 0)) for packet in group_packets),
             "unique_workspaces": len({packet.get("workspace") for packet in group_packets if packet.get("workspace")}),
             "recent_packets_7d": recent_packet_count(timestamps, latest_timestamp),
+            "contaminated_packets": sum(1 for packet in group_packets if packet.get("contamination_signals")),
         }
         task_shapes = _top_values([shape for packet in group_packets for shape in packet.get("task_shape", [])], 3)
         tool_signatures = _top_values([tool for packet in group_packets for tool in packet.get("tool_signature", [])], 5)
@@ -1688,6 +1776,14 @@ def cluster_packets(packets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
             "intent_trace": _aggregate_candidate_list_field(group_packets, "intent_trace", 4),
             "constraints": _aggregate_candidate_list_field(group_packets, "constraints", 4),
             "acceptance_criteria": _aggregate_candidate_list_field(group_packets, "acceptance_criteria", 4),
+            "origin_hint": _combine_origin_hints([str(packet.get("origin_hint") or "") for packet in group_packets]),
+            "contamination_signals": _top_values(
+                [signal for packet in group_packets for signal in packet.get("contamination_signals", []) if signal],
+                4,
+            ),
+            "user_signal_strength": _combine_user_signal_strength(
+                [str(packet.get("user_signal_strength") or "") for packet in group_packets]
+            ),
         }
         candidate["score"] = candidate_score(support)
         candidate.update(build_candidate_quality(candidate, total_packets_all=total_packets_all))

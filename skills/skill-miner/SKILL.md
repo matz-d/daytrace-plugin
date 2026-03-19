@@ -251,6 +251,8 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 - `intent_trace` は `decision_log_stub` にのみ含める（デバッグ・監査用詳細は Decision Log Contract を参照）
 - LLM が分類 override する場合、`intent_trace` を根拠として判断ログ内で引用してよい
 - `needs_research` の `research_brief.questions` に intent 不一致を含めてよい
+- contamination signal（`origin_hint`, `user_signal_strength`, `contamination_signals`）は markdown に短い注記として出してよい
+- `origin_hint=""` は legacy packet 由来の「未観測」を意味し、単独では汚染疑いとして扱わない
 
 ```markdown
 ### 観測範囲
@@ -290,6 +292,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 - `有望候補` には `現状` と `次のステップ` を書く
 - `観測ノート` には 1 文で理由を書く
 - `提案（固定化を推奨）` が 1 件以上ある時だけ、末尾に候補選択プロンプトを付けて次セッションの apply / draft 選択へ進める
+- contamination signal がある候補は `注記:` を付け、内部運用疑い・assistant fallback 依存・summary fallback 依存を短く示してよい
 
 ### 0 件時の出力
 
@@ -396,6 +399,15 @@ LLM が override する条件:
 - Python 側が `agent` を返したが、定型フローに落とせる場合（→ `skill` に override）
 - override 時は判断ログに理由を記録する
 
+contamination signal を見た時の追加ルール:
+
+- `origin_hint="parent_ai"` または `contamination_signals` に `sidechain` を含む候補は、原則 `ready` にしない。`needs_research` または `rejected` に落とし、内部オーケストレーション由来の可能性を明示する
+- `user_signal_strength="low"` かつ `contamination_signals` に `assistant_fallback` または `summary_fallback` を含む候補は、原則 `ready` にしない
+- `origin_hint=""`（legacy packet 由来の metadata 欠落）は単独では downgrade 根拠にしない
+- contamination signal がある候補を昇格させる場合は、「実際の人間依頼が中心である」ことを `evidence_items[]` または detail で確認した短い理由が必須
+- `research_brief.questions` に「実際の人間依頼か、assistant / internal scaffolding 優位か」を含めてよい
+- user-facing proposal では内部由来の疑いを `注記:` として見える化し、無言で `CLAUDE.md` や `skill` に昇格させない
+
 ## Oversized Cluster Guard
 
 `oversized_cluster` / `weak_semantic_cohesion` / `split_recommended` / `near_match_dense` は research 段階の blocking signal とみなす。
@@ -406,6 +418,12 @@ LLM が override する条件:
 - proposal markdown には `研究で解消: ...` を出し、何を解消して ready にしたかを残す
 - oversized が解消されたことを claim するのは「cluster 全体が縮んだ」という意味ではなく、「sampled refs では 1 つの再利用可能パターンとして説明できた」という意味に限る
 
+contamination guard:
+
+- `low_user_signal` / `origin_uncertain` / `contaminated_candidate` は internal-signal guard とみなし、未解消のまま `ready` に入れない
+- これらの flag は assistant fallback や sidechain 混入の疑いを表す。raw history の量ではなく、由来の確からしさを下げる signal として扱う
+- legacy packet に contamination metadata が無い場合は、この guard を発火させない
+
 
 ## Completion Check
 
@@ -414,6 +432,7 @@ LLM が override する条件:
 - 4 分類以外の古い説明が残っていない
 - `suggested_kind` が Python の `infer_suggested_kind()` で事前付与されている
 - `oversized_cluster` が ready に流れていない
+- `low_user_signal` / `origin_uncertain` / `contaminated_candidate` が未解消のまま ready に流れていない
 - proposal phase の根拠が `evidence_items[]` だけで表示できる
 - `0 件` を正常系として扱い、観測サマリと成長兆候を表示している
 - 返却上限は `prepare` の `top_n` と一致している

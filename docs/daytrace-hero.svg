@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">DayTrace Hero Diagram</title>
+  <desc id="desc">Temporary placeholder hero diagram for the DayTrace plugin README.</desc>
+  <rect width="1600" height="900" fill="#0f141c"/>
+  <rect x="80" y="80" width="1440" height="740" rx="32" fill="#131a24" stroke="#243041" stroke-width="2"/>
+  <text x="800" y="210" text-anchor="middle" font-family="Arial, sans-serif" font-size="48" fill="#e8edf5" font-weight="700">DayTrace</text>
+  <text x="800" y="270" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" fill="#7fb6ff">One request → observe → summarize → propose → draft</text>
+
+  <g font-family="Arial, sans-serif">
+    <rect x="170" y="360" width="210" height="120" rx="24" fill="#1c2430" stroke="#4f8fe8" stroke-width="3"/>
+    <text x="275" y="415" text-anchor="middle" font-size="26" fill="#f3f6fb" font-weight="700">Observe</text>
+    <text x="275" y="452" text-anchor="middle" font-size="20" fill="#c7d0dc">5 local sources</text>
+
+    <rect x="440" y="360" width="210" height="120" rx="24" fill="#1c2430" stroke="#4f8fe8" stroke-width="3"/>
+    <text x="545" y="415" text-anchor="middle" font-size="26" fill="#f3f6fb" font-weight="700">Report</text>
+    <text x="545" y="452" text-anchor="middle" font-size="20" fill="#78e08f">date-first</text>
+
+    <rect x="710" y="360" width="210" height="120" rx="24" fill="#1c2430" stroke="#b48cff" stroke-width="3"/>
+    <text x="815" y="415" text-anchor="middle" font-size="26" fill="#f3f6fb" font-weight="700">Mine</text>
+    <text x="815" y="452" text-anchor="middle" font-size="20" fill="#d0b3ff">scope-first</text>
+
+    <rect x="980" y="360" width="210" height="120" rx="24" fill="#1c2430" stroke="#ffbf47" stroke-width="3"/>
+    <text x="1085" y="415" text-anchor="middle" font-size="26" fill="#f3f6fb" font-weight="700">Draft</text>
+    <text x="1085" y="452" text-anchor="middle" font-size="20" fill="#ffd37d">narrative</text>
+
+    <rect x="1250" y="360" width="210" height="120" rx="24" fill="#1c2430" stroke="#49d17d" stroke-width="3"/>
+    <text x="1355" y="415" text-anchor="middle" font-size="26" fill="#f3f6fb" font-weight="700">Outputs</text>
+    <text x="1355" y="452" text-anchor="middle" font-size="20" fill="#9be7b0">report / proposal / draft</text>
+  </g>
+
+  <g stroke="#5ea1ff" stroke-width="8" stroke-linecap="round">
+    <line x1="380" y1="420" x2="440" y2="420"/>
+    <line x1="650" y1="420" x2="710" y2="420"/>
+    <line x1="920" y1="420" x2="980" y2="420"/>
+    <line x1="1190" y1="420" x2="1250" y2="420"/>
+  </g>
+
+  <text x="800" y="610" text-anchor="middle" font-family="Arial, sans-serif" font-size="26" fill="#d8dee8">Bounded autonomy / fail-soft / local-only</text>
+  <text x="800" y="670" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" fill="#97a6ba">Replace this placeholder with the final hackathon SVG at the same path.</text>
+</svg>

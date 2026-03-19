@@ -1429,12 +1429,13 @@ def build_claude_logical_packets(records: list[dict[str, Any]], gap_hours: int) 
             cwd = record.get("cwd") or cwd
             session_id = record.get("sessionId") or session_id
             is_sidechain = bool(record.get("isSidechain"))
-            text = claude_message_text(record.get("message"))
-            if record.get("type") == "user":
-                user_messages.append(text)
-            else:
-                assistant_messages.append(text)
             message = record.get("message")
+            synthetic_user_tool_result = record.get("type") == "user" and claude_message_is_tool_result_only(message)
+            text = claude_message_text(record.get("message"))
+            if record.get("type") == "user" and not synthetic_user_tool_result:
+                user_messages.append(text)
+            elif record.get("type") != "user":
+                assistant_messages.append(text)
             if isinstance(message, dict) and isinstance(message.get("content"), list):
                 for item in message["content"]:
                     if isinstance(item, dict) and item.get("type") == "tool_use":
@@ -1453,7 +1454,8 @@ def build_claude_logical_packets(records: list[dict[str, Any]], gap_hours: int) 
                                     invocation_kind="tool_use",
                                 )
                             )
-            tools.extend(extract_known_commands(text))
+            if not synthetic_user_tool_result:
+                tools.extend(extract_known_commands(text))
 
         packet_cwd = str(cwd) if cwd else None
         referenced_files = extract_referenced_files(tool_inputs, packet_cwd)
@@ -1998,6 +2000,23 @@ def claude_message_text(message: object) -> str:
     return extract_text(message)
 
 
+def claude_message_is_tool_result_only(message: object) -> bool:
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    saw_tool_result = False
+    for item in content:
+        if not isinstance(item, dict):
+            return False
+        if item.get("type") == "tool_result":
+            saw_tool_result = True
+            continue
+        return False
+    return saw_tool_result
+
+
 def codex_message_text(payload: dict[str, Any]) -> str:
     return extract_text(payload.get("content"))
 
@@ -2038,8 +2057,9 @@ def build_packet(
     tool_call_details: list[dict[str, Any]] | None = None,
     referenced_files: list[str] | None = None,
     user_message_source: str = PRIMARY_INTENT_SOURCE_RAW,
+    is_sidechain: bool | None = None,
 ) -> dict[str, Any]:
-    feature_texts, _feature_source = feature_messages_for_packet(user_messages, assistant_messages)
+    feature_texts, feature_source = feature_messages_for_packet(user_messages, assistant_messages)
     normalized_tool_calls = [detail for detail in (tool_call_details or []) if isinstance(detail, dict)]
     tool_trace = _tool_trace_from_details(normalized_tool_calls, tools)
     top_tool, tool_signature, tool_call_count = most_common_tool(tool_trace)
@@ -2065,7 +2085,25 @@ def build_packet(
     assistant_repeated_rules = infer_repeated_rules(assistant_messages, workspace, role="assistant")
     intent_tool_alignment = infer_intent_tool_alignment(task_shape, tool_signature)
     workflow_signals = infer_workflow_signals(user_messages, assistant_messages, normalized_tool_calls, workspace)
-    return {
+    contamination_signals: list[str] = []
+    if is_sidechain:
+        contamination_signals.append("sidechain")
+    if feature_source == "assistant_fallback":
+        contamination_signals.append("assistant_fallback")
+    if primary_intent_source == PRIMARY_INTENT_SOURCE_SUMMARY:
+        contamination_signals.append("summary_fallback")
+    contamination_signals = _dedupe_texts(contamination_signals, limit=4)
+    origin_hint = "human"
+    if "sidechain" in contamination_signals:
+        origin_hint = "parent_ai"
+    elif contamination_signals:
+        origin_hint = "unknown"
+    user_signal_strength = "high"
+    if "assistant_fallback" in contamination_signals or "summary_fallback" in contamination_signals:
+        user_signal_strength = "low"
+    elif primary_intent_source == PRIMARY_INTENT_SOURCE_HIGHLIGHT:
+        user_signal_strength = "medium"
+    packet = {
         "packet_version": SKILL_MINER_PACKET_VERSION,
         "packet_id": packet_id,
         "source": source,
@@ -2089,6 +2127,9 @@ def build_packet(
         "acceptance_criteria": acceptance_criteria,
         "intent_tool_alignment": intent_tool_alignment,
         "workflow_signals": workflow_signals,
+        "origin_hint": origin_hint,
+        "contamination_signals": contamination_signals,
+        "user_signal_strength": user_signal_strength,
         "representative_snippets": snippets,
         "user_rule_hints": user_rule_hints,
         "assistant_rule_hints": assistant_rule_hints,
@@ -2100,6 +2141,9 @@ def build_packet(
             "tool_call_count": tool_call_count,
         },
     }
+    if is_sidechain is not None:
+        packet["is_sidechain"] = bool(is_sidechain)
+    return packet
 
 
 def candidate_label(packet: dict[str, Any]) -> str:
@@ -2200,6 +2244,10 @@ def build_candidate_quality(candidate: dict[str, Any], total_packets_all: int) -
     representative_examples = [str(value) for value in candidate.get("representative_examples", []) if value]
     split_suggestions = [str(value) for value in candidate.get("split_suggestions", []) if str(value).strip()]
     near_matches = candidate.get("near_matches")
+    contamination_signals = [str(value) for value in candidate.get("contamination_signals", []) if str(value).strip()]
+    origin_hint = str(candidate.get("origin_hint") or "").strip()
+    user_signal_strength = str(candidate.get("user_signal_strength") or "").strip()
+    contaminated_packets = int(support.get("contaminated_packets", 0))
 
     quality_flags: list[str] = []
     cluster_share = (float(total_packets) / float(total_packets_all)) if total_packets_all > 0 else 0.0
@@ -2227,6 +2275,17 @@ def build_candidate_quality(candidate: dict[str, Any], total_packets_all: int) -
     split_signal = len(split_suggestions) >= 2
     if split_signal:
         quality_flags.append("split_recommended")
+
+    low_user_signal = user_signal_strength == "low"
+    if low_user_signal:
+        quality_flags.append("low_user_signal")
+
+    uncertain_origin = origin_hint in {"unknown", "mixed", "parent_ai"}
+    if uncertain_origin and contamination_signals:
+        quality_flags.append("origin_uncertain")
+
+    if contaminated_packets > 0:
+        quality_flags.append("contaminated_candidate")
 
     near_match_scores: list[float] = []
     near_match_reasons: list[str] = []
@@ -2285,6 +2344,10 @@ def build_candidate_quality(candidate: dict[str, Any], total_packets_all: int) -
         score -= 1
     if single_session_like:
         score -= 2
+    if low_user_signal:
+        score -= 2
+    elif uncertain_origin:
+        score -= 1
 
     confidence = "strong"
     if score < 1:
@@ -2303,6 +2366,8 @@ def build_candidate_quality(candidate: dict[str, Any], total_packets_all: int) -
         and not split_signal
         and not near_match_dense
         and not single_session_like
+        and not low_user_signal
+        and not uncertain_origin
     )
 
     triage_status = "ready"
@@ -2310,7 +2375,7 @@ def build_candidate_quality(candidate: dict[str, Any], total_packets_all: int) -
         triage_status = "rejected"
     elif proposal_ready:
         triage_status = "ready"
-    elif is_oversized_cluster or weak_semantic_cohesion or split_signal or near_match_dense:
+    elif is_oversized_cluster or weak_semantic_cohesion or split_signal or near_match_dense or low_user_signal or uncertain_origin:
         triage_status = "needs_research"
     elif confidence == "insufficient":
         triage_status = "rejected"
@@ -2419,6 +2484,8 @@ def build_research_targets(
 def build_research_brief(candidate: dict[str, Any]) -> dict[str, Any]:
     label = str(candidate.get("label") or "candidate")
     quality_flags = [str(value) for value in candidate.get("quality_flags", []) if value]
+    contamination_signals = [str(value) for value in candidate.get("contamination_signals", []) if str(value).strip()]
+    origin_hint = str(candidate.get("origin_hint") or "").strip()
     intent_trace = _candidate_text_list(candidate, "intent_trace", limit=MAX_INTENT_TRACE_ITEMS)
     constraints = _candidate_text_list(candidate, "constraints", limit=MAX_CONSTRAINT_ITEMS)
     acceptance_criteria = _candidate_text_list(candidate, "acceptance_criteria", limit=MAX_ACCEPTANCE_CRITERIA_ITEMS)
@@ -2440,6 +2507,9 @@ def build_research_brief(candidate: dict[str, Any]) -> dict[str, Any]:
         decision_rules.append("Do not treat shared review/search tooling alone as evidence of one reusable automation pattern.")
     if "weak_semantic_cohesion" in quality_flags:
         decision_rules.append("If representative examples point to different goals, keep the candidate out of ready state.")
+    if contamination_signals or origin_hint in {"unknown", "mixed", "parent_ai"}:
+        questions.append("Do the sampled refs reflect a real human request, or are they dominated by assistant/internal scaffolding?")
+        decision_rules.append("Reject or defer candidates whose evidence is dominated by assistant fallback, summary fallback, or internal instruction patterns.")
     if len(intent_trace) >= 2:
         questions.append("Which intent variants are the same workflow, and which ones indicate a mixed cluster?")
     if constraints:
@@ -3768,6 +3838,18 @@ def proposal_item_lines(index: int, candidate: dict[str, Any], *, include_classi
         lines.append(f"   制約: {' / '.join(constraints[:2])}")
     if acceptance_criteria:
         lines.append(f"   受け入れ条件: {' / '.join(acceptance_criteria[:2])}")
+    contamination_signals = [str(item).strip() for item in candidate.get("contamination_signals", []) if str(item).strip()]
+    origin_hint = str(candidate.get("origin_hint") or "").strip()
+    user_signal_strength = str(candidate.get("user_signal_strength") or "").strip()
+    if contamination_signals or origin_hint in {"parent_ai", "mixed", "unknown"} or user_signal_strength in {"medium", "low"}:
+        note_parts: list[str] = []
+        if origin_hint:
+            note_parts.append(f"origin={origin_hint}")
+        if user_signal_strength:
+            note_parts.append(f"user_signal={user_signal_strength}")
+        if contamination_signals:
+            note_parts.append(f"signals={','.join(contamination_signals[:4])}")
+        lines.append(f"   注記: {' / '.join(note_parts)}")
     judgment = candidate.get("research_judgment")
     if include_classification:
         handoff = candidate.get("skill_creator_handoff")

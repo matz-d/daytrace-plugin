@@ -196,6 +196,7 @@ def main() -> None:
                     tools=[str(tool) for tool in logical_packet.get("tools", [])],
                     tool_call_details=[detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)],
                     referenced_files=logical_packet.get("referenced_files", []),
+                    is_sidechain=bool(logical_packet.get("is_sidechain")),
                 )
                 serialized_packets.append(
                     {
@@ -239,6 +240,7 @@ def main() -> None:
                 tools=aggregated_tools,
                 tool_call_details=[dict(detail) for detail in aggregated_tool_calls],
                 referenced_files=list(dict.fromkeys(aggregated_referenced_files))[:20],
+                is_sidechain=bool(group["is_sidechain"]),
             )
             first_user = group["user_excerpts"][0] if group["user_excerpts"] else "No user prompt captured"
             summary = f"Claude session: {summarize_text(first_user, 96)}"
