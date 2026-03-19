@@ -6,7 +6,7 @@
 **一度頼めば、観測から提案まで自律完走。**  
 DayTrace は、ローカル証跡を集めて 1 日を再構成し、反復パターンを抽出し、次の改善候補まで返す Claude Code plugin です。
 
-![DayTrace overview](docs/daytrace-hero.svg)
+![DayTrace overview](docs/daytrace-hero.svg?v=2)
 
 ## 何ができるか
 
