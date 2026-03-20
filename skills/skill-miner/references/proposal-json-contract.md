@@ -151,6 +151,7 @@ agent:
 {
   "candidate_id": "string",
   "decision_key": "stable-match-key",
+  "content_key": "stable-content-key-without-kind",
   "label": "display name",
   "recommended_action": "adopt | defer | reject",
   "triage_status": "ready | needs_research | rejected",
@@ -168,6 +169,9 @@ agent:
   "observation_delta": 3
 }
 ```
+
+- `decision_key`: `suggested_kind` を含むため、分類が変わると値が変わる（次回 prepare の一次マッチ用）
+- `content_key`: `label` + `intent_trace` / `constraints` / `acceptance_criteria` の先頭スライスのみから生成。分類変更後も同じ候補なら安定する（carry-forward の二次マッチ用）。`skill_miner_proposal.py` の decision log 永続化行にも含まれる
 
 ## Observation Contract
 

@@ -37,6 +37,7 @@ from skill_miner_common import (
     build_claude_session_ref,
     build_codex_session_ref,
     build_candidate_quality,
+    build_candidate_content_key,
     build_candidate_decision_key,
     build_claude_logical_packets,
     build_codex_logical_packets,
@@ -238,12 +239,48 @@ def _should_resurface(candidate: dict[str, Any], prior_state: dict[str, Any]) ->
     return False
 
 
-def load_latest_decision_states(path: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+def _decision_row_content_key(row: dict[str, Any]) -> str:
+    explicit = str(row.get("content_key") or "").strip()
+    if explicit:
+        return explicit
+    return build_candidate_content_key(row)
+
+
+def _state_from_decision_row(row: dict[str, Any], *, decision_key: str, content_key: str) -> dict[str, Any]:
+    carry_forward = row.get("carry_forward")
+    if not isinstance(carry_forward, bool):
+        carry_forward = True
+    return {
+        "decision_key": decision_key,
+        "content_key": content_key,
+        "candidate_id": row.get("candidate_id"),
+        "label": row.get("label"),
+        "suggested_kind": row.get("suggested_kind"),
+        "intent_trace": list(row.get("intent_trace", [])) if isinstance(row.get("intent_trace"), list) else [],
+        "constraints": list(row.get("constraints", [])) if isinstance(row.get("constraints"), list) else [],
+        "acceptance_criteria": (
+            list(row.get("acceptance_criteria", [])) if isinstance(row.get("acceptance_criteria"), list) else []
+        ),
+        "user_decision": row.get("user_decision"),
+        "user_decision_timestamp": row.get("user_decision_timestamp"),
+        "carry_forward": carry_forward,
+        "observation_count": _coerce_int(row.get("observation_count"), 0),
+        "prior_observation_count": _coerce_int(row.get("prior_observation_count"), 0),
+        "observation_delta": _coerce_int(row.get("observation_delta"), 0),
+        "recorded_at": row.get("recorded_at"),
+    }
+
+
+def load_latest_decision_states(
+    path: Path,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any]]:
     if not path.exists():
-        return {}, {"path": str(path), "status": "missing", "loaded_entries": 0, "active_entries": 0}
+        empty_status = {"path": str(path), "status": "missing", "loaded_entries": 0, "active_entries": 0}
+        return {}, {}, {**empty_status, "content_key_entries": 0}
 
     try:
         latest_by_key: dict[str, dict[str, Any]] = {}
+        latest_by_content_key: dict[str, dict[str, Any]] = {}
         loaded_entries = 0
         for row in load_jsonl(path):
             if row.get("record_type") != "skill_miner_decision_stub":
@@ -252,39 +289,26 @@ def load_latest_decision_states(path: Path) -> tuple[dict[str, dict[str, Any]], 
             decision_key = str(row.get("decision_key") or build_candidate_decision_key(row)).strip()
             if not decision_key:
                 continue
-            carry_forward = row.get("carry_forward")
-            if not isinstance(carry_forward, bool):
-                carry_forward = True
-            latest_by_key[decision_key] = {
-                "decision_key": decision_key,
-                "candidate_id": row.get("candidate_id"),
-                "label": row.get("label"),
-                "suggested_kind": row.get("suggested_kind"),
-                "intent_trace": list(row.get("intent_trace", [])) if isinstance(row.get("intent_trace"), list) else [],
-                "constraints": list(row.get("constraints", [])) if isinstance(row.get("constraints"), list) else [],
-                "acceptance_criteria": (
-                    list(row.get("acceptance_criteria", [])) if isinstance(row.get("acceptance_criteria"), list) else []
-                ),
-                "user_decision": row.get("user_decision"),
-                "user_decision_timestamp": row.get("user_decision_timestamp"),
-                "carry_forward": carry_forward,
-                "observation_count": _coerce_int(row.get("observation_count"), 0),
-                "prior_observation_count": _coerce_int(row.get("prior_observation_count"), 0),
-                "observation_delta": _coerce_int(row.get("observation_delta"), 0),
-                "recorded_at": row.get("recorded_at"),
-            }
-        return latest_by_key, {
+            content_key = _decision_row_content_key(row)
+            state = _state_from_decision_row(row, decision_key=decision_key, content_key=content_key)
+            latest_by_key[decision_key] = state
+            if content_key:
+                latest_by_content_key[content_key] = state
+        status = {
             "path": str(path),
             "status": "loaded",
             "loaded_entries": loaded_entries,
             "active_entries": len(latest_by_key),
+            "content_key_entries": len(latest_by_content_key),
         }
+        return latest_by_key, latest_by_content_key, status
     except Exception as exc:
-        return {}, {
+        return {}, {}, {
             "path": str(path),
             "status": "error",
             "loaded_entries": 0,
             "active_entries": 0,
+            "content_key_entries": 0,
             "message": str(exc),
         }
 
@@ -292,16 +316,28 @@ def load_latest_decision_states(path: Path) -> tuple[dict[str, dict[str, Any]], 
 def apply_decision_states_to_candidates(
     candidates: list[dict[str, Any]],
     decision_states_by_key: dict[str, dict[str, Any]],
+    decision_states_by_content_key: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     retained: list[dict[str, Any]] = []
     suppressed_items: list[dict[str, Any]] = []
     matched_candidates = 0
+    content_key_migrations = 0
 
     for candidate in candidates:
         annotated = dict(candidate)
+        content_key = build_candidate_content_key(annotated)
+        annotated["content_key"] = content_key
         decision_key = build_candidate_decision_key(annotated)
         annotated["decision_key"] = decision_key
         state = decision_states_by_key.get(decision_key)
+        if state is None:
+            prior = decision_states_by_content_key.get(content_key)
+            prior_kind = str(prior.get("suggested_kind") if prior else "").strip()
+            current_kind = str(annotated.get("suggested_kind") or "").strip()
+            if prior is not None and prior_kind != current_kind:
+                state = prior
+                annotated["classification_migrated"] = True
+                content_key_migrations += 1
         if state is None:
             retained.append(annotated)
             continue
@@ -337,6 +373,7 @@ def apply_decision_states_to_candidates(
 
     return retained, {
         "matched_candidates": matched_candidates,
+        "content_key_migrations": content_key_migrations,
         "suppressed_candidates": len(suppressed_items),
         "suppressed_items": suppressed_items[:10],
     }
@@ -2017,8 +2054,12 @@ def main() -> None:
         stats = effective_window["stats"]
         date_window_start = effective_window["date_window_start"]
         resolved_decision_log_path = resolve_decision_log_path(args.decision_log_path)
-        decision_states_by_key, decision_log_status = load_latest_decision_states(resolved_decision_log_path)
-        candidates, decision_log_application = apply_decision_states_to_candidates(candidates, decision_states_by_key)
+        decision_states_by_key, decision_states_by_content_key, decision_log_status = load_latest_decision_states(
+            resolved_decision_log_path
+        )
+        candidates, decision_log_application = apply_decision_states_to_candidates(
+            candidates, decision_states_by_key, decision_states_by_content_key
+        )
         top_candidates = candidates[: max(0, args.top_n)]
         limited_unclustered = unclustered[: max(0, args.max_unclustered)]
 
@@ -2037,6 +2078,7 @@ def main() -> None:
                 "block_comparisons": stats["block_comparisons"],
                 "no_sources_available": len(all_packets) == 0,
                 "decision_log_matched_candidates": decision_log_application["matched_candidates"],
+                "decision_log_content_key_migrations": decision_log_application["content_key_migrations"],
                 "decision_log_suppressed_candidates": decision_log_application["suppressed_candidates"],
             },
             "config": {

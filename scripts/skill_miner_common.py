@@ -3362,10 +3362,9 @@ def build_next_step_stub(candidate: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def build_candidate_decision_key(candidate: dict[str, Any]) -> str:
-    normalized = _normalize_candidate_kind(candidate)
-    identity = {
-        "suggested_kind": str(normalized.get("suggested_kind") or "").strip(),
+def _candidate_stable_identity_parts(normalized: dict[str, Any]) -> dict[str, Any]:
+    """Label + intent/constraints/criteria slices used for decision_key and content_key."""
+    return {
         "label": normalize_match_text(str(normalized.get("label") or normalized.get("primary_intent") or "").strip()),
         "intent_trace": [
             normalize_match_text(item)
@@ -3380,8 +3379,26 @@ def build_candidate_decision_key(candidate: dict[str, Any]) -> str:
             for item in _candidate_text_list(normalized, "acceptance_criteria", limit=MAX_ACCEPTANCE_CRITERIA_ITEMS)[:2]
         ],
     }
+
+
+def _hash_stable_identity(identity: dict[str, Any]) -> str:
     serialized = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(serialized.encode("utf-8")).hexdigest()[:16]
+
+
+def build_candidate_content_key(candidate: dict[str, Any]) -> str:
+    """Stable key for carry-forward when suggested_kind changes (excluded from identity)."""
+    normalized = _normalize_candidate_kind(candidate)
+    return _hash_stable_identity(_candidate_stable_identity_parts(normalized))
+
+
+def build_candidate_decision_key(candidate: dict[str, Any]) -> str:
+    normalized = _normalize_candidate_kind(candidate)
+    identity = {
+        "suggested_kind": str(normalized.get("suggested_kind") or "").strip(),
+        **_candidate_stable_identity_parts(normalized),
+    }
+    return _hash_stable_identity(identity)
 
 
 def build_candidate_decision_stub(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -3414,9 +3431,11 @@ def build_candidate_decision_stub(candidate: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             prior_observation_count = 0
     decision_key = build_candidate_decision_key(candidate)
+    content_key = build_candidate_content_key(candidate)
     return {
         "candidate_id": str(candidate.get("candidate_id") or candidate.get("packet_id") or ""),
         "decision_key": decision_key,
+        "content_key": content_key,
         "label": str(candidate.get("label") or candidate.get("primary_intent") or ""),
         "recommended_action": action,
         "triage_status": triage_status,

@@ -323,6 +323,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 ```json
 {
   "decision_key": "stable-match-key",
+  "content_key": "stable-content-key-without-kind",
   "candidate_id": "id",
   "label": "display name",
   "recommended_action": "adopt | defer | reject",
@@ -340,7 +341,8 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 }
 ```
 フィールド説明:
-- `decision_key`: 次回 prepare の readback に使う安定キー。persist する時はこれを優先して残す
+- `decision_key`: 次回 prepare の readback に使うキー（`suggested_kind` を含む）。分類が変わると値も変わる
+- `content_key`: 分類に依存しない候補本体のキー。`decision_key` が一致しないが同一候補のときの二次マッチに使う（詳細は `references/carry-forward-state-machine.md`）
 - `user_decision`: セッション中にユーザーが adopt / defer / reject を選んだ場合のみ埋まる。Python 側は `null` で初期化する
 - `user_decision_timestamp`: `user_decision` 設定時の ISO8601。Python 側は `null` で初期化する
 - `carry_forward`: 次回 prepare で考慮すべきか。デフォルト `true`

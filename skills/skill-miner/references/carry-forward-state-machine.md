@@ -102,6 +102,17 @@
 - 取り込み時に `adopted_at`（既存 timestamp を流用）と `adopted_via`（`skill` / `hook` / `agent` / `CLAUDE.md`）を保存する
 - migration 後の主判定は store `adopted` を正とし、`carry_forward` は互換読み取り専用（legacy）として扱う
 
+## `decision_key` と `content_key`（二次マッチ）
+
+`decision_key` は `suggested_kind` を含むため、LLM overlay や heuristic の更新で分類だけが変わるとキーが一致しなくなり、従来の decision log 行との carry-forward が切れる。
+
+対策として `content_key` を別途持ち、`skill_miner_prepare.py` の readback は次の順で照合する。
+
+1. **一次**: `decision_key` が一致する行を採用（従来どおり）
+2. **二次**: 一次で見つからないとき、`content_key` が一致し、かつログ上の `suggested_kind` と今回候補の `suggested_kind` が異なる場合のみ、該当行を採用する。このとき候補に `classification_migrated: true` を付与する
+
+二次マッチは「分類だけが変わった」ケースに限定する。`content_key` が一致しても kind が同じなら二次では採用しない（一次で `decision_key` が一致しているはず）。
+
 ## observation_count の追跡
 
 decision_log_stub に `observation_count` フィールドを追加:
