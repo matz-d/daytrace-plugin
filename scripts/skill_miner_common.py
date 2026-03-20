@@ -2829,17 +2829,203 @@ def infer_suggested_kind_details(candidate: dict[str, Any]) -> dict[str, str]:
     return {"kind": "skill", "reason": "default reusable workflow fallback"}
 
 
+def _candidate_task_shapes(candidate: dict[str, Any]) -> list[str]:
+    return [str(value).strip() for value in candidate.get("common_task_shapes", candidate.get("task_shape", [])) if str(value).strip()]
+
+
+def _candidate_artifact_hints(candidate: dict[str, Any]) -> list[str]:
+    return [str(value).strip() for value in candidate.get("artifact_hints", []) if str(value).strip()]
+
+
+def _candidate_rule_hints(candidate: dict[str, Any]) -> list[str]:
+    return [str(value).strip() for value in candidate.get("rule_hints", []) if str(value).strip()]
+
+
+def _candidate_tool_signatures(candidate: dict[str, Any]) -> list[str]:
+    return [
+        str(value).strip()
+        for value in candidate.get("common_tool_signatures", candidate.get("tool_signature", []))
+        if str(value).strip()
+    ]
+
+
+def _candidate_total_packets(candidate: dict[str, Any]) -> int:
+    support = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
+    try:
+        return int(support.get("total_packets", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _valid_suggested_kind(value: Any) -> str:
+    normalized = str(value or "").strip()
+    return normalized if normalized in VALID_SUGGESTED_KINDS else ""
+
+
+def _candidate_has_claude_md_signal(candidate: dict[str, Any]) -> bool:
+    artifact_hints = _candidate_artifact_hints(candidate)
+    rule_hints = _candidate_rule_hints(candidate)
+    return "claude-md" in artifact_hints or any(rule in CLAUDE_MD_RULE_NAMES for rule in rule_hints)
+
+
+def _candidate_has_skill_signal(candidate: dict[str, Any]) -> bool:
+    task_shapes = _candidate_task_shapes(candidate)
+    artifact_hints = _candidate_artifact_hints(candidate)
+    return any(shape in SKILL_SHAPES or shape in SKILL_SHAPE_INDICATORS for shape in task_shapes) or any(
+        hint in SKILL_ARTIFACT_INDICATORS for hint in artifact_hints
+    )
+
+
+def _candidate_meets_hook_guardrail(candidate: dict[str, Any]) -> bool:
+    task_shapes = _candidate_task_shapes(candidate)
+    tool_signatures = _candidate_tool_signatures(candidate)
+    rule_hints = _candidate_rule_hints(candidate)
+    if task_shapes and all(shape in HOOK_SHAPES for shape in task_shapes[:2]):
+        return True
+    if any(rule in HOOK_RULE_INDICATORS for rule in rule_hints):
+        return any(tool in HOOK_TOOL_INDICATORS or tool in {"pytest", "make"} for tool in tool_signatures)
+    return False
+
+
+def _candidate_meets_agent_guardrail(candidate: dict[str, Any]) -> bool:
+    task_shapes = _candidate_task_shapes(candidate)
+    rule_hints = _candidate_rule_hints(candidate)
+    total_packets = _candidate_total_packets(candidate)
+    if total_packets < 4:
+        return False
+    if _candidate_has_claude_md_signal(candidate):
+        return False
+    return any(shape in AGENT_SHAPES for shape in task_shapes) or any(
+        rule not in CLAUDE_MD_RULE_NAMES for rule in rule_hints
+    )
+
+
+def _classification_trace_entry(stage: str, kind: str, reason: str) -> dict[str, str]:
+    return {
+        "stage": stage,
+        "kind": kind,
+        "reason": reason,
+    }
+
+
+def _apply_classification_guardrail(
+    candidate: dict[str, Any],
+    proposed_kind: str,
+    *,
+    heuristic: dict[str, str],
+) -> dict[str, str]:
+    if proposed_kind == "hook" and not _candidate_meets_hook_guardrail(candidate):
+        fallback = heuristic["kind"] if heuristic["kind"] != "hook" else "skill"
+        return {
+            "kind": fallback,
+            "reason": "guardrail override: hook requires a deterministic automation trigger",
+        }
+    if proposed_kind == "agent":
+        if _candidate_has_claude_md_signal(candidate):
+            return {
+                "kind": "CLAUDE.md",
+                "reason": "guardrail override: rule-centric candidates should stay in CLAUDE.md",
+            }
+        if not _candidate_meets_agent_guardrail(candidate):
+            fallback = heuristic["kind"] if heuristic["kind"] != "agent" else "skill"
+            return {
+                "kind": fallback,
+                "reason": "guardrail override: agent requires stronger repeated behavior signals",
+            }
+    if proposed_kind == "CLAUDE.md" and not _candidate_has_claude_md_signal(candidate):
+        fallback = "skill" if _candidate_has_skill_signal(candidate) else heuristic["kind"]
+        if fallback == "CLAUDE.md":
+            fallback = "skill"
+        return {
+            "kind": fallback,
+            "reason": "guardrail override: CLAUDE.md should stay rule-centric, not workflow-heavy",
+        }
+    if proposed_kind == "skill" and _candidate_has_claude_md_signal(candidate) and not _candidate_has_skill_signal(candidate):
+        return {
+            "kind": "CLAUDE.md",
+            "reason": "guardrail override: repeated rules without workflow steps belong in CLAUDE.md",
+        }
+    return {"kind": proposed_kind, "reason": ""}
+
+
 def _normalize_candidate_kind(candidate: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(candidate)
-    raw_kind = str(candidate.get("suggested_kind") or "").strip()
-    if raw_kind in VALID_SUGGESTED_KINDS:
-        normalized["suggested_kind_source"] = "provided"
-        return normalized
     inferred = infer_suggested_kind_details(candidate)
-    normalized["suggested_kind"] = inferred["kind"]
-    normalized["suggested_kind_reason"] = inferred["reason"]
-    normalized["suggested_kind_source"] = "heuristic"
+    trace: list[dict[str, str]] = []
+    raw_kind = _valid_suggested_kind(candidate.get("suggested_kind"))
+    raw_reason = str(candidate.get("suggested_kind_reason") or "").strip()
+    llm_kind = _valid_suggested_kind(candidate.get("llm_suggested_kind"))
+    llm_reason = str(candidate.get("llm_reason") or candidate.get("classification_reason") or "").strip()
+
+    if raw_kind:
+        selected_kind = raw_kind
+        selected_reason = raw_reason or "provided candidate classification"
+        selected_source = str(candidate.get("suggested_kind_source") or "provided").strip() or "provided"
+        trace.append(_classification_trace_entry("provided", raw_kind, selected_reason))
+        if not llm_kind:
+            normalized["suggested_kind"] = selected_kind
+            normalized["suggested_kind_reason"] = selected_reason
+            normalized["suggested_kind_source"] = selected_source
+            normalized["classification_trace"] = trace
+            return normalized
+    else:
+        selected_kind = inferred["kind"]
+        selected_reason = inferred["reason"]
+        selected_source = "heuristic"
+        trace.append(_classification_trace_entry("heuristic", inferred["kind"], inferred["reason"]))
+
+    if llm_kind:
+        selected_kind = llm_kind
+        selected_reason = llm_reason or "llm classification overlay"
+        selected_source = "llm"
+        trace.append(_classification_trace_entry("llm", llm_kind, selected_reason))
+
+    guarded = _apply_classification_guardrail(candidate, selected_kind, heuristic=inferred)
+    final_kind = guarded["kind"]
+    final_reason = guarded["reason"] or selected_reason
+    final_source = selected_source
+    if final_kind != selected_kind:
+        final_source = "guardrail_override"
+        trace.append(_classification_trace_entry("guardrail", final_kind, guarded["reason"]))
+
+    normalized["suggested_kind"] = final_kind
+    normalized["suggested_kind_reason"] = final_reason
+    normalized["suggested_kind_source"] = final_source
+    normalized["classification_trace"] = trace
     return normalized
+
+
+def merge_classification_into_candidate(candidate: dict[str, Any], classification_payload: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(candidate)
+    if not classification_payload:
+        return merged
+    raw_overlay = classification_payload.get("classification", classification_payload)
+    if not isinstance(raw_overlay, dict):
+        return merged
+    overlay = dict(raw_overlay)
+    llm_kind = _valid_suggested_kind(
+        overlay.get("llm_suggested_kind")
+        or overlay.get("suggested_kind")
+        or overlay.get("kind")
+    )
+    if llm_kind:
+        merged["llm_suggested_kind"] = llm_kind
+    llm_reason = str(
+        overlay.get("llm_reason")
+        or overlay.get("reason")
+        or overlay.get("classification_reason")
+        or ""
+    ).strip()
+    if llm_reason:
+        merged["llm_reason"] = llm_reason
+    why_not = overlay.get("why_not_other_kinds")
+    if isinstance(why_not, list):
+        merged["why_not_other_kinds"] = [str(item).strip() for item in why_not if str(item).strip()]
+    llm_confidence = str(overlay.get("confidence") or "").strip()
+    if llm_confidence:
+        merged["llm_confidence"] = llm_confidence
+    merged["classification_overlay"] = overlay
+    return merged
 
 
 def _skill_slug(text: str) -> str:
@@ -3462,8 +3648,13 @@ def _ready_state_guard_reasons(candidate: dict[str, Any]) -> list[str]:
     return reasons
 
 
-def build_proposal_sections(prepare_payload: dict[str, Any], judgments_by_candidate_id: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+def build_proposal_sections(
+    prepare_payload: dict[str, Any],
+    judgments_by_candidate_id: dict[str, dict[str, Any]] | None = None,
+    classifications_by_candidate_id: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     judgments_by_candidate_id = judgments_by_candidate_id or {}
+    classifications_by_candidate_id = classifications_by_candidate_id or {}
     ready: list[dict[str, Any]] = []
     needs_research: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -3473,6 +3664,7 @@ def build_proposal_sections(prepare_payload: dict[str, Any], judgments_by_candid
             continue
         candidate_id = str(raw_candidate.get("candidate_id") or "")
         candidate = merge_judgment_into_candidate(raw_candidate, judgments_by_candidate_id.get(candidate_id))
+        candidate = merge_classification_into_candidate(candidate, classifications_by_candidate_id.get(candidate_id))
         split_children = _materialize_split_candidates(candidate)
         if split_children:
             for child in split_children:
@@ -3819,6 +4011,23 @@ def proposal_item_lines(index: int, candidate: dict[str, Any], *, include_classi
     lines = [f"{index}. {candidate.get('label', 'Unnamed candidate')}"]
     if include_classification:
         lines.append(f"   固定先: {candidate.get('suggested_kind', 'TBD')}")
+        source = str(candidate.get("suggested_kind_source") or "").strip()
+        if source in {"llm", "guardrail_override"}:
+            trace = candidate.get("classification_trace")
+            if isinstance(trace, list):
+                trace_parts = []
+                for item in trace:
+                    if not isinstance(item, dict):
+                        continue
+                    stage = str(item.get("stage") or "").strip()
+                    kind = str(item.get("kind") or "").strip()
+                    if stage and kind:
+                        trace_parts.append(f"{stage}={kind}")
+                if trace_parts:
+                    lines.append(f"   分類トレース: {' / '.join(trace_parts)}")
+            reason = str(candidate.get("suggested_kind_reason") or "").strip()
+            if reason:
+                lines.append(f"   分類理由: {reason}")
     _CONFIDENCE_LABELS = {
         "strong": "確度: 高い — 複数セッション・複数ソースで繰り返し観測",
         "medium": "確度: 中程度 — 複数セッションで出現、もう少し定着を見たい",

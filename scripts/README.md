@@ -341,6 +341,7 @@ Important fields:
 Purpose:
 
 - accepts prepare output and optional research judgments
+- optionally accepts classification overlays for LLM-first kind selection experiments
 - returns final `ready` / `needs_research` / `rejected` proposal sections and markdown
 - renders the evidence chain directly from `candidates[].evidence_items[]`
 - does not reload raw history
@@ -369,8 +370,10 @@ Important fields:
 - `user_decision_overlay`: how many normalized user decisions from `--user-decision-file` were matched and applied before persistence
 - `persistence.decision_log`: append result for the shared JSONL decision log
 - `persistence.skill_creator_handoff`: persisted handoff bundle metadata for `skill` proposals
+- `ready[].classification_trace`: optional classification path for `llm` / `guardrail_override` results
 - `--decision-log-path`: optional JSONL output path for `decision_log_stub`; pass the same path used by prepare if you want next-run carry-forward behavior to close the loop
 - `--skill-creator-handoff-dir`: optional output directory for persisted skill scaffold / handoff bundles
+- `--classification-file`: optional JSON overlay with `candidate_id` and `classification.llm_suggested_kind`
 - `--user-decision-file`: optional normalized decision payload; when provided, proposal overlays `adopt` / `defer` / `reject` before persisting the next decision-log row set
 
 Contract notes:

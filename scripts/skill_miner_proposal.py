@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build proposal sections from skill-miner prepare output and optional research judgments.")
     parser.add_argument("--prepare-file", required=True, help="Path to the JSON file produced by skill_miner_prepare.py.")
     parser.add_argument("--judge-file", action="append", default=[], help="Path to a JSON file produced by skill_miner_research_judge.py.")
+    parser.add_argument("--classification-file", action="append", default=[], help="Path to a JSON file with classification overlay for one candidate.")
     parser.add_argument("--decision-log-path", help="Optional JSONL path to persist decision_log_stub entries.")
     parser.add_argument("--skill-creator-handoff-dir", help="Optional directory to persist JSON skill-creator handoff bundles (context + handoff metadata).")
     parser.add_argument("--user-decision-file", help="Optional JSON file with user decisions to persist alongside decision stubs.")
@@ -48,6 +49,20 @@ def load_judgments(paths: list[str]) -> dict[str, dict[str, Any]]:
         if isinstance(candidate_id, str) and candidate_id:
             judgments[candidate_id] = payload
     return judgments
+
+
+def load_classification_overlays(paths: list[str]) -> dict[str, dict[str, Any]]:
+    overlays: dict[str, dict[str, Any]] = {}
+    for raw_path in paths:
+        try:
+            payload = load_json(Path(raw_path).expanduser().resolve())
+        except (OSError, ValueError, json.JSONDecodeError):
+            # Malformed or unreadable overlay: skip so proposal falls back to heuristic for that candidate.
+            continue
+        candidate_id = payload.get("candidate_id")
+        if isinstance(candidate_id, str) and candidate_id:
+            overlays[candidate_id] = payload
+    return overlays
 
 
 def load_user_decisions(path: str | None) -> dict[str, dict[str, Any]]:
@@ -314,7 +329,12 @@ def main() -> None:
     try:
         prepare_payload = load_json(Path(args.prepare_file).expanduser().resolve())
         judgments = load_judgments(args.judge_file)
-        proposal = build_proposal_sections(prepare_payload, judgments_by_candidate_id=judgments)
+        classifications = load_classification_overlays(args.classification_file)
+        proposal = build_proposal_sections(
+            prepare_payload,
+            judgments_by_candidate_id=judgments,
+            classifications_by_candidate_id=classifications,
+        )
         recorded_at = recorded_at_iso()
         user_decisions = load_user_decisions(args.user_decision_file)
         user_decision_overlay = apply_user_decisions(

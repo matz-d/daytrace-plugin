@@ -65,10 +65,16 @@ SESSION_TMP="${SESSION_TMP:-$(mktemp -d "${TMPDIR:-/tmp}/daytrace-session-XXXXXX
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_research_judge.py --candidate-file "$SESSION_TMP/prepare.json" --candidate-id "<candidate_id>" --detail-file "$SESSION_TMP/detail.json"
 ```
 
-最終 proposal 組み立て:
+最終 proposal 組み立て（classification overlay がある場合は `--classification-file` を繰り返す）:
 ```bash
 SESSION_TMP="${SESSION_TMP:-$(mktemp -d "${TMPDIR:-/tmp}/daytrace-session-XXXXXX")}"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$SESSION_TMP/prepare.json" --judge-file "$SESSION_TMP/judge.json" --decision-log-path ~/.daytrace/skill-miner-decisions.jsonl --skill-creator-handoff-dir ~/.daytrace/skill-creator-handoffs > "$SESSION_TMP/proposal.json"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py \
+  --prepare-file "$SESSION_TMP/prepare.json" \
+  --judge-file "$SESSION_TMP/judge.json" \
+  --classification-file "$SESSION_TMP/classifications/c1.json" \
+  --decision-log-path ~/.daytrace/skill-miner-decisions.jsonl \
+  --skill-creator-handoff-dir ~/.daytrace/skill-creator-handoffs \
+  > "$SESSION_TMP/proposal.json"
 ```
 ユーザー判断の writeback:
 ```bash
@@ -380,6 +386,13 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 `suggested_kind` は Python 側の `infer_suggested_kind()` がヒューリスティックに事前付与する。
 LLM は override できるが、明確な理由がない限り Python のデフォルトを尊重する。
 
+**生成経路（どちらでも可）**:
+
+- **親エージェント**: `prepare.json` を読み、`references/classification-prompt.md` の contract に従って候補ごとに overlay JSON を書き出す
+- **子サブエージェント**: 親が `candidate_id` と抜粋を渡し、サブが 1 候補 1 ファイルの overlay を返す（contract は同一）
+
+いずれの経路でも、確定処理は script 側に集約する。`skill_miner_proposal.py` に `--classification-file <json>` を **候補ごとに繰り返し**渡すと merge + guardrail で final kind になる。ファイルが無い・JSON 破損のファイルはスキップされ、当該候補は heuristic のみにフォールバックする。
+
 判定ルール（優先順）:
 
 1. `CLAUDE.md`: `artifact_hints` に `claude-md` または `rule_hints` に CLAUDE.md 系ルール名 → `CLAUDE.md`
@@ -398,6 +411,7 @@ LLM が override する条件:
 - Python 側が `skill` をデフォルトで返したが、「どう振る舞うか」が主題で継続的役割が明白な場合（→ `agent` に override）
 - Python 側が `agent` を返したが、定型フローに落とせる場合（→ `skill` に override）
 - override 時は判断ログに理由を記録する
+- proposal JSON では `suggested_kind_source=llm | guardrail_override` と `classification_trace` に反映される
 
 contamination signal を見た時の追加ルール:
 

@@ -68,12 +68,26 @@ SESSION_TMP="${SESSION_TMP:-$(mktemp -d "${TMPDIR:-/tmp}/daytrace-session-XXXXXX
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_research_judge.py --candidate-file "$SESSION_TMP/prepare.json" --candidate-id "<id>" --detail-file "$SESSION_TMP/detail.json"
 ```
 
+Phase 3 Classification（`ready` + `needs_research` の各候補。オーバーレイは任意）:
+
+- 契約と few-shot は `skills/skill-miner/references/classification-prompt.md` を正とする
+- 1 候補 1 ファイル（例: `$SESSION_TMP/classifications/<candidate_id>.json`）を親エージェントまたは子サブエージェントが生成する
+
 Phase 3 Proposal:
 
 ```bash
 SESSION_TMP="${SESSION_TMP:-$(mktemp -d "${TMPDIR:-/tmp}/daytrace-session-XXXXXX")}"
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$SESSION_TMP/prepare.json" --judge-file "$SESSION_TMP/judge.json" --decision-log-path ~/.daytrace/skill-miner-decisions.jsonl --skill-creator-handoff-dir ~/.daytrace/skill-creator-handoffs > "$SESSION_TMP/proposal.json"
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py \
+  --prepare-file "$SESSION_TMP/prepare.json" \
+  --judge-file "$SESSION_TMP/judge.json" \
+  --classification-file "$SESSION_TMP/classifications/c1.json" \
+  --classification-file "$SESSION_TMP/classifications/c2.json" \
+  --decision-log-path ~/.daytrace/skill-miner-decisions.jsonl \
+  --skill-creator-handoff-dir ~/.daytrace/skill-creator-handoffs \
+  > "$SESSION_TMP/proposal.json"
 ```
+
+`--classification-file` は存在するオーバーレイごとに繰り返す。オーバーレイが無い場合は引数ごと省略してよい（Python heuristic のみで proposal を組み立てる）。
 
 Phase 3 Decision Writeback (conditional):
 
@@ -158,18 +172,19 @@ Phase 1 完了直後、Phase 2 に入る前に「今日の DayTrace ダイジェ
 
 ### Phase 3: Pattern Mining & Proposals
 
-1. `skill_miner_prepare.py` を 1 回実行する
+1. `skill_miner_prepare.py` を 1 回実行する（stdout を `$SESSION_TMP/prepare.json` に保存）
 2. `candidates[]` を確認する
 3. 自動判断 — 追加調査:
    - 条件: `needs_research` 候補が 1 件以上
    - 満たす場合: 各 `needs_research` 候補の `research_targets` 上位 refs で `skill_miner_detail.py` → `skill_miner_research_judge.py` を自動実行する
    - 1 候補あたり最大 5 refs、追加調査は 1 回まで
-4. 分類判定:
-   - `suggested_kind` は Python の `infer_suggested_kind()` が事前付与済み
-   - LLM は明確な理由がある場合のみ override する（Pre-Classification Contract 参照）
-   - `agent` は Python も条件付きで推定するが、条件が厳しく付与は稀。LLM は evidence を確認して override してよい（Pre-Classification Contract 参照）
+4. **Classification（prepare 後・proposal 前）**:
+   - `triage_status` が `ready` または `needs_research` の候補を対象とし（`rejected` は原則スキップ）、候補ごとに `classification-prompt.md` の contract に従った overlay JSON を 1 ファイル生成する
+   - 実行主体は親エージェントを既定とし、長い場合は子サブエージェントへ候補単位で委譲してよい
+   - `suggested_kind` は Python の `infer_suggested_kind()` が事前付与済みであることが多い。LLM は evidence に基づき override してよいが、明確な理由がない限り heuristic を尊重する（Pre-Classification Contract 参照）
+   - `agent` は guardrail で落とされることがある。証跡が弱いときは保守的な分類・`confidence: low` を付けてよい
 5. 提案の組み立て:
-    - prepare 出力と judge 出力（あれば）を `skill_miner_proposal.py` に渡し、stdout を shell redirect で `$SESSION_TMP/proposal.json` に保存する
+    - prepare 出力・judge 出力（あれば）・**全 classification overlay（あれば）** を `skill_miner_proposal.py` に渡す（`--classification-file` を候補ごとに繰り返す）。stdout を shell redirect で `$SESSION_TMP/proposal.json` に保存する
     - `proposal.json` は machine-actionable JSON（contract 詳細は `skill-miner/references/proposal-json-contract.md`）
     - ユーザー向けには `markdown` フィールドを出力する
     - structured judgment log では `observation_contract` を正として使う
@@ -188,7 +203,7 @@ Phase 1 完了直後、Phase 2 に入る前に「今日の DayTrace ダイジェ
     - ユーザーが「あとで」「今回は見送る」と答えた場合は `skill_miner_decision.py` で `defer` / `reject` を記録する
  8. user decision を受け取った場合:
     - `skill_miner_decision.py --output-file "$SESSION_TMP/user-decision.json"` を実行する
-    - 同じ prepare / judge / decision-log-path / handoff-dir を使って `skill_miner_proposal.py --user-decision-file "$SESSION_TMP/user-decision.json"` を再実行する
+    - 同じ prepare / judge / **classification overlay（初回 proposal 時と同一の `--classification-file` 集合）** / decision-log-path / handoff-dir を使って `skill_miner_proposal.py --user-decision-file "$SESSION_TMP/user-decision.json"` を再実行する
     - 再実行結果を Phase 3 の最終 persistence 状態として扱う
  9. 判断ログは 1 行に圧縮する:
 
@@ -315,7 +330,7 @@ Phase 2 (daily-report):
 
 Phase 3 Mining (skill-miner):
 - 分類は `CLAUDE.md` / `skill` / `hook` / `agent` の 4 つのみ。`plugin` は使わない
-- `suggested_kind` は Python 事前付与。LLM override は理由記録が必須
+- `suggested_kind` は Python 事前付与が基本。`classification-prompt.md` に従う overlay で LLM が上書きしてよい。override は理由記録が必須
 - `oversized_cluster` 等の blocking signal が未解消なら `ready` に入れない
 - `origin_hint` / `user_signal_strength` / `contamination_signals` に internal-signal guard が出ている候補は、legacy metadata 欠落 (`origin_hint=""`) を除き `ready` に上げない
 - proposal の根拠は `evidence_items[]` だけで完結させ、raw history を再読込しない
@@ -359,7 +374,7 @@ Phase 4 (post-draft):
 | 続行 vs 停止 | success >= 1 | 続行 | 空日報 → Phase 5 |
 | 共有用追加 | mode 未指定 & total_groups >= 5 | 両方生成 | 自分用のみ |
 | 追加調査実行 | needs_research >= 1 | detail + judge 自動実行 | スキップ |
-| 分類判定 | suggested_kind は Python が事前付与 | LLM は override 理由がある場合のみ変更 | そのまま使用 |
+| 分類判定 | prepare の heuristic が事前付与 | classification overlay で LLM が上書き可（理由必須）。overlay 無し・破損時は heuristic のみ | guardrail で最終確定 |
 | contamination guard | `origin_hint/user_signal_strength/contamination_signals` を確認 | internal 疑いなら `needs_research` に留める | そのまま継続 |
 | 固定化アクション | `CLAUDE.md` → diff preview / `skill` → scaffold | 該当アクションを表示 | hook/agent は次セッションへ |
 | 投稿下書き | AI + Git 共起 or groups >= 4 | 生成 | スキップ |

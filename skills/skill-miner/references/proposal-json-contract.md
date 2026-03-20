@@ -46,7 +46,10 @@
   "candidate_id": "string",
   "label": "display name",
   "suggested_kind": "CLAUDE.md | skill | hook | agent",
-  "suggested_kind_source": "heuristic | override",
+  "suggested_kind_source": "provided | heuristic | llm | guardrail_override",
+  "classification_trace": [
+    { "stage": "heuristic | provided | llm | guardrail", "kind": "skill", "reason": "..." }
+  ],
   "confidence": "strong | medium",
   "proposal_ready": true,
   "triage_status": "ready",
@@ -75,6 +78,7 @@
 - `user_signal_strength` は `primary_intent` がどれだけ user 側から復元できたかのヒント。`low` は assistant fallback や summary fallback に依存した candidate を示す
 - `contamination_signals` は user-facing proposal を慎重に扱うべき補助 signal。現時点の代表値は `assistant_fallback`, `summary_fallback`, `sidechain`
 - `support.contaminated_packets` は contamination signal を持つ packet 数。0 でない場合は `ready` に上げる前に signal を確認する
+- `classification_trace` は分類の採用経路を表す。MVP では `provided / heuristic / llm / guardrail` の順で最大 3-4 ステップ入る
 
 ### `skill_scaffold_context` (suggested_kind=skill)
 
