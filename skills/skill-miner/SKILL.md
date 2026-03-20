@@ -262,7 +262,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 
 1. 候補名
    固定先: skill
-   confidence: medium
+   確度: 中程度 — 複数セッションで出現、もう少し定着を見たい
    根拠:
    - 2026-03-08T10:00:00+09:00 claude-history: findings-first review を要求
    - 2026-03-10T09:00:00+09:00 codex-history: 同系の review 指示を再確認
@@ -272,7 +272,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 ## 有望候補（もう少し観測が必要）
 
 1. 候補名
-   confidence: weak
+   確度: まだ弱い — 出現回数が少なく、今後の観測次第
    出現: 3回 / 2ソース
    根拠:
    - 2026-03-08T10:00:00+09:00 claude-history: 汎用 review 指示
@@ -282,7 +282,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 ## 観測ノート
 
 1. 候補名または項目種別
-   理由: 単発または一般化の根拠不足
+   理由: 1 回だけの出現で、繰り返しパターンとは判断できませんでした
 ```
 
 ルール:
@@ -415,7 +415,7 @@ contamination signal を見た時の追加ルール:
 
 - judgment なしの blocking signal → `needs_research` に強制
 - judgment で `promote_ready` された candidate → 追加調査で blocking signal を解消済みとして `提案（固定化を推奨）` へ昇格してよい
-- proposal markdown には `研究で解消: ...` を出し、何を解消して ready にしたかを残す
+- proposal markdown には `追加調査で確認済み: ...` を出し、何を解消して ready にしたかを残す
 - oversized が解消されたことを claim するのは「cluster 全体が縮んだ」という意味ではなく、「sampled refs では 1 つの再利用可能パターンとして説明できた」という意味に限る
 
 contamination guard:

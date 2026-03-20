@@ -228,10 +228,10 @@ ACCEPTANCE_KEYWORDS = (
 )
 READY_BLOCKING_FLAGS = {"oversized_cluster", "split_recommended", "weak_semantic_cohesion", "near_match_dense"}
 READY_BLOCKING_FLAG_LABELS = {
-    "oversized_cluster": "巨大クラスタ",
-    "split_recommended": "分割推奨",
-    "weak_semantic_cohesion": "意味のまとまり不足",
-    "near_match_dense": "近接クラスタ競合",
+    "oversized_cluster": "大きなグループだが一貫したパターンとして説明可能",
+    "split_recommended": "分割せず 1 つのパターンとして扱える",
+    "weak_semantic_cohesion": "意味的なまとまりがあることを確認",
+    "near_match_dense": "類似パターンとの重複なし",
 }
 
 BROAD_LABEL_TASK_SHAPES = {"prepare_report", "write_markdown", "search_code", "inspect_files", "summarize_findings"}
@@ -3819,7 +3819,17 @@ def proposal_item_lines(index: int, candidate: dict[str, Any], *, include_classi
     lines = [f"{index}. {candidate.get('label', 'Unnamed candidate')}"]
     if include_classification:
         lines.append(f"   固定先: {candidate.get('suggested_kind', 'TBD')}")
-    lines.append(f"   confidence: {candidate.get('confidence', 'unknown')}")
+    _CONFIDENCE_LABELS = {
+        "strong": "確度: 高い — 複数セッション・複数ソースで繰り返し観測",
+        "medium": "確度: 中程度 — 複数セッションで出現、もう少し定着を見たい",
+        "weak": "確度: まだ弱い — 出現回数が少なく、今後の観測次第",
+    }
+    _conf = candidate.get("confidence", "")
+    _conf_label = _CONFIDENCE_LABELS.get(_conf)
+    if _conf_label is None:
+        _conf_display = candidate.get("confidence", "不明")
+        _conf_label = f"確度: {_conf_display}"
+    lines.append(f"   {_conf_label}")
     support = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
     total_packets = support.get("total_packets")
     claude_packets = int(support.get("claude_packets", 0)) if support else 0
@@ -3873,7 +3883,7 @@ def proposal_item_lines(index: int, candidate: dict[str, Any], *, include_classi
             if str(flag).strip()
         ]
         if resolved_flags:
-            lines.append(f"   研究で解消: {', '.join(resolved_flags[:4])}")
+            lines.append(f"   追加調査で確認済み: {', '.join(resolved_flags[:4])}")
         lines.append(f"   期待効果: {candidate.get('label', 'この候補')} の再利用フローを安定化できる")
         lines.append("   → この作法を固定すれば、毎回の指示が不要になります")
     elif isinstance(judgment, dict):

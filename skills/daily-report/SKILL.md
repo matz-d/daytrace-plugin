@@ -155,8 +155,10 @@ mode によって構成と文体を変えるが、どちらも date-first の日
 
 - 先頭は必ず `## 日報 YYYY-MM-DD`
 - 活動項目は 3-6 個
-- 各項目に `根拠` を付ける。根拠は `[source 名] の [内容]` の形式で、source 名とログ内容を組み合わせて示す
-  - 例: `根拠: git の commit ログ "Add source registry drop-in support" と、Claude の会話ログ "drop-in の設計を議論"`
+- 根拠の扱いは mode で異なる:
+  - 自分用: 各項目に `根拠:` を inline で付ける。根拠は `[source 名] の [内容]` の形式
+    - 例: `根拠: git の commit ログ "Add source registry drop-in support" と、Claude の会話ログ "drop-in の設計を議論"`
+  - 共有用: 本文には根拠を書かない。日報末尾に `### 参考: 根拠一覧` セクションを設け、項目番号と根拠を対応付けて一括記載する
 - 同じ内容を重複して書かない
 - `未完了の手がかり` をログから読み取れた分だけ付ける（0 件可）
 - 手がかりがなければ「ログからは未完了の手がかりを特定できませんでした」で閉じる
@@ -178,8 +180,10 @@ mode によって構成と文体を変えるが、どちらも date-first の日
 自分だけが後で読み返して思い出せることを優先する。
 
 - 構成: 時系列ベース
+- 文体: メモ的な文体でよい。「〜した」「〜だった」のような簡潔な表現を使う
 - 語彙: メモ的でよい。省略可
 - 文量: 各項目 1-3 文
+- 根拠: 各項目に `根拠:` を inline で付ける
 - 未完了の扱い: 途中 / TODO / 詰まりをそのまま残してよい
 - 文脈補足: 最小限でよい
 
@@ -202,8 +206,10 @@ mode によって構成と文体を変えるが、どちらも date-first の日
 第三者が読んで、その日の成果と残課題を把握できることを優先する。
 
 - 構成: カテゴリベース
+- 文体: ですます調を使う。「〜した」「〜だった」ではなく「〜しました」「〜でした」で書く
 - 語彙: 第三者が読める表現
 - 文量: 各項目 2-4 文
+- 根拠: 本文には書かない。日報末尾の `### 参考: 根拠一覧` にまとめる
 - 未完了の扱い: 成果と残課題を分けて書く
 - 文脈補足: 「なぜやったか」を 1 文添える
 - 主従の編集: 中心テーマを 1-2 本に絞り、他は補助的な出来事として扱う
@@ -224,14 +230,13 @@ mode によって構成と文体を変えるが、どちらも date-first の日
 ## 日報 YYYY-MM-DD
 
 ### 今日の概要
-- 1-2文で全体要約
+- 1-2文で全体要約（ですます調）
 
 ### 実装
 - 見出し
-  - 内容: 2-4文
+  - 内容: 2-4文（ですます調）
   - 成果:
   - 残課題:
-  - 根拠: git の commit ログ "xxx" と Claude の会話ログ "yyy"
 
 ### 調査
 - 必要なら追加
@@ -241,6 +246,10 @@ mode によって構成と文体を変えるが、どちらも date-first の日
 
 ### 未完了の手がかり
 - ログから読み取れた分だけ（0 件可）
+
+### 参考: 根拠一覧
+- 実装-1: git の commit ログ "xxx" と Claude の会話ログ "yyy"
+- 調査-1: Chrome の閲覧ログ、Codex の会話ログ "zzz"
 ```
 
 ## Mixed-Scope Note Rules
@@ -353,30 +362,32 @@ source 欠損の判定は `summary` と `sources` から行う。
 この日報は、1日のログと workspace ローカルの変更ログをもとに再構成しています。
 
 ### 今日の概要
-- 日報 skill を date-first 前提へ再整理し、共有向けに読める mode 契約と mixed-scope 注記ルールを明文化した。
+- 日報 skill を date-first 前提へ再整理し、共有向けに読める mode 契約と mixed-scope 注記ルールを明文化しました。
 
 ### 実装
-- daily-report の仕様を `workspace default` から `date-first default + optional workspace filter` へ更新した。
-  - 成果: 対象スコープ、入口 ask、confidence の扱いを 1 つの契約として読み取れる形に整理した。
-  - 残課題: 実データを使った wording の最終確認は別途必要。
-  - 根拠: git の commit ログ "Refactor daily-report to date-first"、Codex の会話ログ "仕様整理"
+- daily-report の仕様を `workspace default` から `date-first default + optional workspace filter` へ更新しました。
+  - 成果: 対象スコープ、入口 ask、confidence の扱いを 1 つの契約として読み取れる形に整理しました。
+  - 残課題: 実データを使った wording の最終確認は別途必要です。
 
 ### 設計 / 判断
-- `自分用` と `共有用` の差を、構成・語彙・未完了の扱いまで分けて定義した。
-  - 成果: 共有用では背景説明と成果 / 残課題の分離を必須にした。
-  - 残課題: 実際の生成文がこの差分を安定して守れるかは運用確認が必要。
-  - 根拠: SKILL.md の mode 定義、workspace-file-activity の更新痕跡
+- `自分用` と `共有用` の差を、構成・語彙・未完了の扱いまで分けて定義しました。
+  - 成果: 共有用では背景説明と成果 / 残課題の分離を必須にしました。
+  - 残課題: 実際の生成文がこの差分を安定して守れるかは運用確認が必要です。
 
 ### 調査
-- mixed-scope の説明は `sources[].scope` を見て自動で注記する前提に整理した。
-  - 成果: coverage の誤認を避けつつ、date-first の価値を落とさないルールにした。
-  - 残課題: 一部の補助ログは意図を断定できないため、本文内注記で扱う。
-  - 根拠: aggregate.py の `sources[].scope`、sources.json の scope_mode
+- mixed-scope の説明は `sources[].scope` を見て自動で注記する前提に整理しました。
+  - 成果: coverage の誤認を避けつつ、date-first の価値を落とさないルールにしました。
+  - 残課題: 一部の補助ログは意図を断定できないため、本文内注記で扱います。
   - 注記: ブラウザログのみからの補助推定です
 
 ### 未完了の手がかり
 - mixed-scope 注記を fixture ベースでレビューする（commit の TODO コメントに記載あり）
 - README / demo 側の文言と整合させる
+
+### 参考: 根拠一覧
+- 実装-1: Git の commit ログ "Refactor daily-report to date-first"、Codex の会話ログ "仕様整理"
+- 設計/判断-1: SKILL.md の mode 定義、workspace-file-activity の更新痕跡
+- 調査-1: aggregate.py の `sources[].scope`、sources.json の scope_mode
 
 > 再構成元: git-history, codex-history, chrome-history, workspace-file-activity / workspace ローカルの変更ログは daytrace に限定
 ```
