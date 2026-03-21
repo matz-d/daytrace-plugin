@@ -16,7 +16,7 @@
 
 - `skill_miner_research_judge.py` を 1 回だけ実行して structured conclusion を得る
 - `promote_ready`
-  - `提案（固定化を推奨）` へ移す
+  - `提案（アクション候補）` へ移す
   - `oversized_cluster` / `weak_semantic_cohesion` / `split_recommended` / `near_match_dense` を解消した場合だけ許可する
   - proposal 側には「追加調査で確認した注意信号」を残す
 - `split_candidate`

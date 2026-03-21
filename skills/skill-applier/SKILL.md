@@ -1,20 +1,21 @@
 ---
 name: skill-applier
 description: >
-  skill-miner が提案した候補を実際の成果物（CLAUDE.md ルール追記、skill scaffold、hook/agent 設計案）に
-  固定化する。「提案を適用して」「CLAUDE.md に追加して」「skill にして」「hook 化して」と言われた時に使う。
-  daytrace-session Phase 3 の固定化アクションも担う。
+  skill-miner が提案した候補を実際の成果物に変換する。
+  CLAUDE.md ルール追記、skill scaffold、hook 設定生成、agent 定義生成を行う。
+  「提案を適用して」「CLAUDE.md に追加して」「skill にして」「hook 化して」「エージェントにして」と言われた時に使う。
+  daytrace-session Phase 3 のアクション実行も担う。
 user-invocable: true
 ---
 
 # Skill Applier
 
-skill-miner の proposal を concrete artifact に固定化する skill。
+skill-miner の proposal を concrete artifact に変換する skill。
 
 ## Goal
 
-- miner が返した proposal の selected candidate を受け取り、`suggested_kind` に応じた固定化アクションを実行する
-- 固定化後のユーザー判断（adopt / defer / reject）を decision log に writeback する
+- miner が返した proposal の selected candidate を受け取り、`suggested_kind` に応じたアクションを実行する
+- アクション後のユーザー判断（adopt / defer / reject）を decision log に writeback する
 - 各 kind の詳細仕様は `references/` に分離し、本体は dispatch と共通ルールに集中する
 
 やらないこと:
@@ -34,25 +35,26 @@ JSON contract の全体像は `skills/skill-miner/references/proposal-json-contr
 - `ready[].suggested_kind` — dispatch 分岐キー
 - `ready[].skill_scaffold_context` — skill scaffold draft の構造化入力（kind=skill）
 - `ready[].skill_creator_handoff` — skill-creator への handoff prompt + context_file（kind=skill）
-- `ready[].next_step_stub` — hook/agent 設計案の構造化入力（kind=hook|agent）
+- `ready[].next_step_stub` — hook/agent 生成の構造化入力（kind=hook|agent）
 - `ready[].evidence_items[]` — 根拠表示用
 - `decision_log_stub[]` — decision writeback の対象
 
 ## Dispatch Rules
 
-候補の `suggested_kind` に応じて固定化パスを分岐する:
+候補の `suggested_kind` に応じてアクションパスを分岐する:
 
 | suggested_kind | アクション | 詳細仕様 |
 |---------------|-----------|---------|
 | `CLAUDE.md` | Immediate Apply — diff preview → apply | `references/claude-md-apply.md` |
 | `skill` | Scaffold Draft — context 構造化 → skill-creator handoff | `references/skill-scaffold.md` |
-| `hook` | Design Proposal — 設計案提示 → 次セッション | `references/hook-agent-nextstep.md` |
-| `agent` | Design Proposal — 設計案提示 → 次セッション | `references/hook-agent-nextstep.md` |
+| `hook` | Guided Creation — 設計案提示 → 承認後 settings.json に生成 | `references/hook-agent-nextstep.md`, `references/hook-creation-guide.md` |
+| `agent` | Guided Creation — 設計案提示 → 承認後 agents/ に生成 | `references/hook-agent-nextstep.md`, `references/agent-creation-guide.md` |
 
 共通ルール:
 
-- `CLAUDE.md` だけが low-risk immediate apply path を持つ
-- `skill` / `hook` / `agent` は即時生成しない（設計案や handoff の提示のみ）
+- `CLAUDE.md` だけが low-risk immediate apply path を持つ（diff preview → 即時適用）
+- `skill` は skill-creator に handoff する（scaffold context の提示のみ）
+- `hook` / `agent` はユーザー承認後にこの skill 内で生成する
 - detail phase でも raw history 全量には戻らない
 
 ## Scripts
@@ -76,11 +78,11 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$S
 
 ## Detail / Draft Rules
 
-- `提案（固定化を推奨）` に候補がある場合だけ、1 件選んでもらう
+- `提案（アクション候補）` に候補がある場合だけ、1 件選んでもらう
 - 選択候補の `session_refs` だけを `skill_miner_detail.py --refs ...` で取得する
 - `CLAUDE.md` は immediate apply path で対応する（`references/claude-md-apply.md`）
 - `skill` は Skill Scaffold Draft Spec に従い scaffold context を出す（`references/skill-scaffold.md`）
-- `hook` / `agent` は Next Step Contract に従う（`references/hook-agent-nextstep.md`）
+- `hook` / `agent` は Guided Creation Contract に従う（`references/hook-agent-nextstep.md` + フォーマット仕様は `references/hook-creation-guide.md` / `references/agent-creation-guide.md`）
 - detail phase でも raw history 全量には戻らない
 
 ## Decision Writeback
@@ -95,13 +97,16 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$S
 
 - `CLAUDE.md` apply 成功 → `--decision adopt --completion-state completed`
 - `skill` scaffold 提示完了 → `--completion-state completed` は `done` 明示確認時のみ（確認手順は `references/skill-scaffold.md` の「done 確認フロー」に従う）
-- `hook` / `agent` 設計案提示 → 成功未確認のまま session を閉じる場合は `adopt` を確定させず、`pending` 経由で `defer` 扱い
+- `hook` 生成成功 → `--decision adopt --completion-state completed`
+- `agent` 生成成功 → `--decision adopt --completion-state completed`
+- `hook` / `agent` 生成をユーザーが承認しなかった場合は `pending` 経由で `defer` 扱い
 - ユーザーが「あとで」「今回は見送る」→ `defer` / `reject` を記録
 
 ## Completion Check
 
-- selected candidate に対して適切な固定化パスが実行されている
+- selected candidate に対して適切なアクションパスが実行されている
 - `CLAUDE.md` の場合: diff preview が表示され、apply/skip の結果が記録されている
 - `skill` の場合: scaffold context が構造化されて提示されている
-- `hook` / `agent` の場合: 設計案が提示されている
+- `hook` の場合: 設計案が提示され、承認後 settings.json に hook が生成されている
+- `agent` の場合: 設計案が提示され、承認後 agents/ に .md ファイルが生成されている
 - user decision が writeback されている（選択があった場合）

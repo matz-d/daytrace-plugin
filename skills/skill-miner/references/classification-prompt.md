@@ -2,6 +2,8 @@
 
 親エージェントまたはサブエージェントが、`skill_miner_prepare.py` の **1 候補につき 1 ファイル** の classification overlay JSON を生成する際の入出力仕様である。LLM 呼び出しは `skill_miner_proposal.py` 内には含めず、この contract に従った JSON をファイルとして渡す。
 
+**対象候補の絞り込み**: 全 `ready` / `needs_research` に対して必ず overlay を作る必要はない。`classify-target-selection.md` を参照し、曖昧候補だけを分類する。`triage_status: rejected` の候補は原則この contract の対象外（overlay を作らない）。
+
 詳細な分類境界は `classification.md`、proposal 全体は `proposal-json-contract.md` を参照する。
 
 ## 入力（各候補について読むフィールド）
@@ -12,7 +14,7 @@
 |-----------|------|
 | `candidate_id` | overlay の `candidate_id` と一致させる必須キー |
 | `label` | 候補の表示名・要約 |
-| `triage_status` | `ready` / `needs_research` / `rejected`（**rejected は原則 overlay を作らない**） |
+| `triage_status` | `ready` / `needs_research` / `rejected`（**rejected は原則 overlay を作らない** — 他候補も `classify-target-selection.md` で省略可） |
 | `proposal_ready` | 正式提案に載るか |
 | `suggested_kind` | Python `infer_suggested_kind` の事前付与（空の場合あり）。尊重するか override するかを判断する |
 | `confidence` / `confidence_reason` | 観測の強さ |
@@ -50,7 +52,7 @@
 - **`llm_reason`**（必須に近い）  
   override 時は必ず内容のある説明。Heuristic と同じ结论でも、検証メモとして 1 文あってよい。
 - **`confidence`**（任意）  
-  付与してよい。現行の `skill_miner_proposal.py` は **confidence 値に応じて guardrail を変えない**（観測・説明用）。
+  付与してよい。現行の `skill_miner_proposal.py` は **confidence 値に応じて guardrail を変えない**（観測・説明用）。proposal の `classification_guardrail_signals.llm_confidence` にエコーされる。
 - **`why_not_other_kinds`**（任意）  
   文字列の配列。空配列可。
 
@@ -122,6 +124,42 @@
 ```
 
 （※ この例ではスクリプトの guardrail により `skill` 等へ落ちる可能性がある。観測が増えたら再分類する想定。）
+
+### 例 4: LLM が `hook`、guardrail が `CLAUDE.md` に戻す（ルールだけ先に付いたケース）
+
+**状況**: `rule_hints` に `tests-before-close` があり、ヒューリスティックは `CLAUDE.md` 寄り。LLM は「ゲートだから hook」としたが、混在 task_shape やツール証跡が弱いと script 側で `CLAUDE.md` に落ちることがある。
+
+```json
+{
+  "candidate_id": "c-gate-004",
+  "classification": {
+    "llm_suggested_kind": "hook",
+    "llm_reason": "Automated verification before merge.",
+    "confidence": "medium",
+    "why_not_other_kinds": ["Not a standing role (agent). Not a multi-step manual skill."]
+  }
+}
+```
+
+生成側は `evidence_items` で **run_tests が先頭の機械的パターン**か、**tests-before-close + 十分な観測**かを確認するとよい。
+
+### 例 5: LLM が `agent`、guardrail が `skill` に落とす（証跡不足）
+
+**状況**: ラベルだけ「ヘルパー agent」風だが、`intent_trace` が 1 行だけ、`total_packets` も少ない。
+
+```json
+{
+  "candidate_id": "c-weak-005",
+  "classification": {
+    "llm_suggested_kind": "agent",
+    "llm_reason": "Feels like a helper role.",
+    "confidence": "low",
+    "why_not_other_kinds": []
+  }
+}
+```
+
+**観測**: proposal JSON の `classification_trace` に `guardrail` ステップが付き、`classification_guardrail_signals.agent_role_consistency` が `false` になりやすい。
 
 ## ファイル配置と proposal への渡し方
 

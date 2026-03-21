@@ -15,6 +15,7 @@
   "rejected":          [/* candidate objects */],
 
   "markdown":          "rendered proposal markdown (human-readable view)",
+  "markdown_classification_detail": false,
   "selection_prompt":  "string | null",
   "decision_log_stub": [/* decision stub objects */],
   "learning_feedback": {/* status, reason_summary, next_step */},
@@ -36,6 +37,8 @@
   }
 }
 ```
+
+`markdown_classification_detail` は `skill_miner_proposal.py` の `--markdown-classification-detail` に対応する。`false`（既定）のときは `markdown` 内の LLM / guardrail 由来の説明を 1 行に圧縮し、`classification_trace` の長い展開は省略する。`ready[]` 各要素の `classification_trace` / `classification_guardrail_signals` は **常に** machine-actionable として保持される。
 
 ## Ready Candidate Object
 
@@ -68,12 +71,23 @@
 
   "skill_scaffold_context":  {/* skill candidates only */},
   "skill_creator_handoff":   {/* skill candidates only */},
-  "next_step_stub":          {/* hook/agent candidates only */}
+  "next_step_stub":          {/* hook/agent candidates only */},
+
+  "classification_guardrail_signals": {
+    "claude_md_classic_signal": true,
+    "declarative_weight": 100.0,
+    "workflow_weight": 5.0,
+    "declarative_ratio": 1.0,
+    "agent_role_consistency": false,
+    "claude_md_qualifies": true,
+    "llm_confidence": "high"
+  }
 }
 ```
 
 補足:
 
+- `classification_guardrail_signals` は Phase 3 で追加された **観測用** フィールド。guardrail が参照した宣言的比率・役割一貫性・従来の CLAUDE.md artifact 有無などをまとめる。`llm_confidence` は overlay の `confidence` があれば反映し、**guardrail の分岐は現状これに依存しない**（ログ分析・プロンプト改善用）
 - `origin_hint` は packet 群の由来ヒント。`human` は通常の人間主導パターン、`parent_ai` は sidechain/subagent 起点、`mixed` は人間起点と内部足場が混在、`unknown` は補助 signal が弱く判定保留、空文字は legacy packet 由来で未観測を意味する
 - `user_signal_strength` は `primary_intent` がどれだけ user 側から復元できたかのヒント。`low` は assistant fallback や summary fallback に依存した candidate を示す
 - `contamination_signals` は user-facing proposal を慎重に扱うべき補助 signal。現時点の代表値は `assistant_fallback`, `summary_fallback`, `sidechain`

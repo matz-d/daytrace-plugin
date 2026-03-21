@@ -15,7 +15,7 @@ AI 会話履歴を横断して、固定化すべき作法を `extract / classify
 
 - Claude / Codex 履歴から反復パターンを抽出する
 - 候補を `CLAUDE.md` / `skill` / `hook` / `agent` の 4 分類で判定する
-- `提案（固定化を推奨） / 有望候補（もう少し観測が必要） / 観測ノート` の main UX で返す
+- `提案（アクション候補） / 有望候補（もう少し観測が必要） / 観測ノート` の main UX で返す
 - proposal phase では raw history を再読込せず、prepare の contract だけで根拠表示を完結させる
 
 やらないこと:
@@ -99,8 +99,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$S
 7. `candidates` と `unclustered` を `ready` / `needs_research` / `rejected` に分ける
 8. 正式提案は `proposal_ready=true` の候補だけを採用し、返却件数は `prepare` 側の `top_n` に従う（デフォルト `10`）。`0 件` でも正常系として扱う
 9. `needs_research` 候補だけ、必要な場合に限って `research_targets` を使って 1 回だけ追加調査する
-10. `skill_miner_research_judge.py` の結論を proposal に反映し、`提案（固定化を推奨） / 有望候補 / 観測ノート` を返す
-11. `提案（固定化を推奨）` がある時だけ、次セッションでどれを apply するかを確認する
+10. `skill_miner_research_judge.py` の結論を proposal に反映し、`提案（アクション候補） / 有望候補 / 観測ノート` を返す
+11. `提案（アクション候補）` がある時だけ、次セッションでどれを apply するかを確認する
 
 ## Division of Labor
 
@@ -247,6 +247,8 @@ B0 観測の方法と優先順位ルールは `references/b0-observation.md` を
 
 ## Proposal Format (Markdown View)
 
+既定の `markdown` は **最終 `suggested_kind`・短い分類サマリ（LLM/guardrail 時）・根拠・次の一手**を中心にし、`classification_trace` の段階展開は省略する。詳細は `--markdown-classification-detail` または `ready[]` の JSON を参照。
+
 proposal の冒頭には観測範囲を明示し、3 区分で返す。
 内部 triage key（`ready` / `needs_research` / `rejected`）はそのままで、ユーザー向け見出しだけを変更する。
 
@@ -264,7 +266,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 ### 観測範囲
 観測範囲: {workspace名} / 直近 {N}日間 / {使用した source リスト}
 
-## 提案（固定化を推奨）
+## 提案（アクション候補）
 
 1. 候補名
    固定先: skill
@@ -293,11 +295,11 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 
 ルール:
 
-- `提案（固定化を推奨） / 有望候補 / 観測ノート` を main UX にする
-- `提案（固定化を推奨）` だけを重要度順に並べる
+- `提案（アクション候補） / 有望候補 / 観測ノート` を main UX にする
+- `提案（アクション候補）` だけを重要度順に並べる
 - `有望候補` には `現状` と `次のステップ` を書く
 - `観測ノート` には 1 文で理由を書く
-- `提案（固定化を推奨）` が 1 件以上ある時だけ、末尾に候補選択プロンプトを付けて次セッションの apply / draft 選択へ進める
+- `提案（アクション候補）` が 1 件以上ある時だけ、末尾に候補選択プロンプトを付けて次セッションの apply / draft 選択へ進める
 - contamination signal がある候補は `注記:` を付け、内部運用疑い・assistant fallback 依存・summary fallback 依存を短く示してよい
 
 ### 0 件時の出力
@@ -308,7 +310,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 ### 観測範囲
 観測範囲: {workspace名} / 直近 {N}日間 / {source}
 
-## 提案（固定化を推奨）
+## 提案（アクション候補）
 今回は有力候補なし
 
 検出候補数: {N}件中 0 件が提案条件を満たした
@@ -372,7 +374,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 追加調査後:
 
 - `promote_ready`
-  - `提案（固定化を推奨）` へ移す
+  - `提案（アクション候補）` へ移す
 - `split_candidate`
   - `有望候補` に残し、必要なら分割軸を書く
 - `reject_candidate`
@@ -382,6 +384,14 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 
 候補選択後の固定化アクション（CLAUDE.md apply / skill scaffold / hook・agent 設計案）は `skill-applier` skill が担う。
 詳細は `skills/skill-applier/SKILL.md` を参照する。
+
+## Phase 3 classify 対象の絞り込み
+
+LLM classification overlay は **全候補ではなく曖昧候補だけ**にかける。`rejected` は原則 overlay なし。明らかな `hook`・強い `CLAUDE.md` シグナルでヒューリスティックが閉じている候補は省略してよい。
+
+- 規準の全文: `references/classify-target-selection.md`
+- proposal の **markdown** は既定で分類内部を圧縮（1 行サマリ）。長い `classification_trace` を載せる場合は `skill_miner_proposal.py --markdown-classification-detail`
+- **JSON** の `ready[]` は常に `classification_trace` / `classification_guardrail_signals` を保持（内部 contract を壊さない）
 
 ## Pre-Classification Contract
 
@@ -414,6 +424,7 @@ LLM が override する条件:
 - Python 側が `agent` を返したが、定型フローに落とせる場合（→ `skill` に override）
 - override 時は判断ログに理由を記録する
 - proposal JSON では `suggested_kind_source=llm | guardrail_override` と `classification_trace` に反映される
+- Phase 3 以降、`ready[]` の各候補に **`classification_guardrail_signals`**（宣言的比率・役割一貫性・従来 CLAUDE.md シグナル等）が付く。overlay の `confidence` は **guardrail 分岐に使わず**、観測・プロンプト改善用。境界と few-shot は `references/classification.md` / `references/classification-prompt.md` を参照
 
 contamination signal を見た時の追加ルール:
 
@@ -430,7 +441,7 @@ contamination signal を見た時の追加ルール:
 これらが未解消のまま `ready` に入ることはない。
 
 - judgment なしの blocking signal → `needs_research` に強制
-- judgment で `promote_ready` された candidate → 追加調査で blocking signal を解消済みとして `提案（固定化を推奨）` へ昇格してよい
+- judgment で `promote_ready` された candidate → 追加調査で blocking signal を解消済みとして `提案（アクション候補）` へ昇格してよい
 - proposal markdown には `追加調査で確認済み: ...` を出し、何を解消して ready にしたかを残す
 - oversized が解消されたことを claim するのは「cluster 全体が縮んだ」という意味ではなく、「sampled refs では 1 つの再利用可能パターンとして説明できた」という意味に限る
 

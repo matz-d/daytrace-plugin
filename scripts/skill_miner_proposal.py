@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decision-log-path", help="Optional JSONL path to persist decision_log_stub entries.")
     parser.add_argument("--skill-creator-handoff-dir", help="Optional directory to persist JSON skill-creator handoff bundles (context + handoff metadata).")
     parser.add_argument("--user-decision-file", help="Optional JSON file with user decisions to persist alongside decision stubs.")
+    parser.add_argument(
+        "--markdown-classification-detail",
+        action="store_true",
+        help="Include full classification trace and per-stage reasons in proposal markdown (default: compact one-line summary).",
+    )
     return parser
 
 
@@ -335,6 +340,7 @@ def main() -> None:
             prepare_payload,
             judgments_by_candidate_id=judgments,
             classifications_by_candidate_id=classifications,
+            markdown_classification_detail=args.markdown_classification_detail,
         )
         recorded_at = recorded_at_iso()
         user_decisions = load_user_decisions(args.user_decision_file)

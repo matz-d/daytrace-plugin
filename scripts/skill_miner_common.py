@@ -179,6 +179,24 @@ GENERIC_TOOL_SIGNATURES = {
 }
 
 VALID_SUGGESTED_KINDS = {"CLAUDE.md", "skill", "hook", "agent"}
+# Substrings for intent/label (normalized lower). Two+ distinct lines must match for agent role consistency.
+AGENT_ROLE_SUBSTRINGS = (
+    "reviewer",
+    "persistent role",
+    "standing",
+    "triage",
+    "observer",
+    "watchdog",
+    "router",
+    "coordinator",
+    "across tasks",
+    "across sessions",
+    "always act",
+    "レビュー",
+    "役割",
+    "振る舞い",
+    "横断",
+)
 CONSTRAINT_RULE_NAMES = {"never-do", "confirm-before"}
 ACCEPTANCE_RULE_NAMES = {"findings-first", "file-line-refs", "tests-before-close", "format-rule"}
 CLAUDE_MD_RULE_NAMES = {
@@ -2857,6 +2875,108 @@ def _candidate_total_packets(candidate: dict[str, Any]) -> int:
         return 0
 
 
+def _candidate_intent_lines_for_role(candidate: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    label = str(candidate.get("label") or "").strip()
+    if label:
+        lines.append(label)
+    for item in candidate.get("intent_trace") or []:
+        t = str(item).strip()
+        if t:
+            lines.append(t)
+    return lines[:6]
+
+
+def _line_matches_agent_role_signal(line: str) -> bool:
+    low = normalize_match_text(line).lower()
+    return any(sub in low for sub in AGENT_ROLE_SUBSTRINGS)
+
+
+def _candidate_has_agent_role_consistency_signal(candidate: dict[str, Any]) -> bool:
+    """Two or more distinct label/intent lines mention role-like language (agent guardrail assist)."""
+    distinct_role_lines = 0
+    seen_normalized: set[str] = set()
+    for line in _candidate_intent_lines_for_role(candidate):
+        if not _line_matches_agent_role_signal(line):
+            continue
+        key = normalize_match_text(line).lower()
+        if not key or key in seen_normalized:
+            continue
+        seen_normalized.add(key)
+        distinct_role_lines += 1
+    return distinct_role_lines >= 2
+
+
+def _declarative_weight_for_claude_md(candidate: dict[str, Any]) -> float:
+    if _candidate_has_claude_md_signal(candidate):
+        return 100.0
+    weight = 0.0
+    rule_hints = _candidate_rule_hints(candidate)
+    weight += sum(1.0 for rule in rule_hints if rule in CLAUDE_MD_RULE_NAMES)
+    for item in candidate.get("constraints", []) or []:
+        text = normalize_match_text(str(item)).lower()
+        if any(keyword in text for keyword in CONSTRAINT_KEYWORDS):
+            weight += 1.0
+    for item in candidate.get("acceptance_criteria", []) or []:
+        text = normalize_match_text(str(item)).lower()
+        if any(keyword in text for keyword in ACCEPTANCE_KEYWORDS):
+            weight += 0.5
+    return weight
+
+
+def _workflow_weight_for_claude_md(candidate: dict[str, Any]) -> float:
+    weight = 0.0
+    for shape in _candidate_task_shapes(candidate):
+        if shape in SKILL_SHAPES or shape in SKILL_SHAPE_INDICATORS:
+            weight += 1.5
+        if shape in HOOK_SHAPES:
+            weight += 1.0
+    if _candidate_has_skill_signal(candidate):
+        weight += 1.0
+    return weight
+
+
+def _claude_md_declarative_ratio(candidate: dict[str, Any]) -> float:
+    declarative = _declarative_weight_for_claude_md(candidate)
+    workflow = _workflow_weight_for_claude_md(candidate)
+    if declarative >= 100.0:
+        return 1.0
+    total = declarative + workflow
+    if total < 1e-9:
+        return 0.0
+    return declarative / total
+
+
+def _candidate_qualifies_for_claude_md_kind(candidate: dict[str, Any]) -> bool:
+    """Classic artifact/rule signal, or strong declarative-to-workflow ratio (Phase 3 guardrail)."""
+    if _candidate_has_claude_md_signal(candidate):
+        return True
+    declarative = _declarative_weight_for_claude_md(candidate)
+    workflow = _workflow_weight_for_claude_md(candidate)
+    if declarative >= 100.0:
+        return True
+    if declarative < 2.0:
+        return False
+    total = declarative + workflow
+    if total < 1e-9:
+        return False
+    return (declarative / total) >= 0.55
+
+
+def _build_classification_guardrail_signals(candidate: dict[str, Any]) -> dict[str, Any]:
+    declarative = _declarative_weight_for_claude_md(candidate)
+    workflow = _workflow_weight_for_claude_md(candidate)
+    return {
+        "claude_md_classic_signal": _candidate_has_claude_md_signal(candidate),
+        "declarative_weight": round(min(declarative, 100.0), 3),
+        "workflow_weight": round(workflow, 3),
+        "declarative_ratio": round(_claude_md_declarative_ratio(candidate), 4),
+        "agent_role_consistency": _candidate_has_agent_role_consistency_signal(candidate),
+        "claude_md_qualifies": _candidate_qualifies_for_claude_md_kind(candidate),
+        "llm_confidence": str(candidate.get("llm_confidence") or "").strip() or None,
+    }
+
+
 def _valid_suggested_kind(value: Any) -> str:
     normalized = str(value or "").strip()
     return normalized if normalized in VALID_SUGGESTED_KINDS else ""
@@ -2882,6 +3002,15 @@ def _candidate_meets_hook_guardrail(candidate: dict[str, Any]) -> bool:
     rule_hints = _candidate_rule_hints(candidate)
     if task_shapes and all(shape in HOOK_SHAPES for shape in task_shapes[:2]):
         return True
+    # Narrow gate before hook-rule+tool: tests-before-close + run_tests first + packets (no tool proof).
+    # Must run before HOOK_RULE_INDICATORS branch because tests-before-close is also in that set.
+    if (
+        task_shapes
+        and task_shapes[0] == "run_tests"
+        and "tests-before-close" in rule_hints
+        and _candidate_total_packets(candidate) >= 3
+    ):
+        return True
     if any(rule in HOOK_RULE_INDICATORS for rule in rule_hints):
         return any(tool in HOOK_TOOL_INDICATORS or tool in {"pytest", "make"} for tool in tool_signatures)
     return False
@@ -2895,9 +3024,11 @@ def _candidate_meets_agent_guardrail(candidate: dict[str, Any]) -> bool:
         return False
     if _candidate_has_claude_md_signal(candidate):
         return False
-    return any(shape in AGENT_SHAPES for shape in task_shapes) or any(
+    if any(shape in AGENT_SHAPES for shape in task_shapes) or any(
         rule not in CLAUDE_MD_RULE_NAMES for rule in rule_hints
-    )
+    ):
+        return True
+    return _candidate_has_agent_role_consistency_signal(candidate)
 
 
 def _classification_trace_entry(stage: str, kind: str, reason: str) -> dict[str, str]:
@@ -2932,7 +3063,7 @@ def _apply_classification_guardrail(
                 "kind": fallback,
                 "reason": "guardrail override: agent requires stronger repeated behavior signals",
             }
-    if proposed_kind == "CLAUDE.md" and not _candidate_has_claude_md_signal(candidate):
+    if proposed_kind == "CLAUDE.md" and not _candidate_qualifies_for_claude_md_kind(candidate):
         fallback = "skill" if _candidate_has_skill_signal(candidate) else heuristic["kind"]
         if fallback == "CLAUDE.md":
             fallback = "skill"
@@ -2940,7 +3071,7 @@ def _apply_classification_guardrail(
             "kind": fallback,
             "reason": "guardrail override: CLAUDE.md should stay rule-centric, not workflow-heavy",
         }
-    if proposed_kind == "skill" and _candidate_has_claude_md_signal(candidate) and not _candidate_has_skill_signal(candidate):
+    if proposed_kind == "skill" and _candidate_qualifies_for_claude_md_kind(candidate) and not _candidate_has_skill_signal(candidate):
         return {
             "kind": "CLAUDE.md",
             "reason": "guardrail override: repeated rules without workflow steps belong in CLAUDE.md",
@@ -2967,6 +3098,7 @@ def _normalize_candidate_kind(candidate: dict[str, Any]) -> dict[str, Any]:
             normalized["suggested_kind_reason"] = selected_reason
             normalized["suggested_kind_source"] = selected_source
             normalized["classification_trace"] = trace
+            normalized["classification_guardrail_signals"] = _build_classification_guardrail_signals(normalized)
             return normalized
     else:
         selected_kind = inferred["kind"]
@@ -2992,6 +3124,7 @@ def _normalize_candidate_kind(candidate: dict[str, Any]) -> dict[str, Any]:
     normalized["suggested_kind_reason"] = final_reason
     normalized["suggested_kind_source"] = final_source
     normalized["classification_trace"] = trace
+    normalized["classification_guardrail_signals"] = _build_classification_guardrail_signals(normalized)
     return normalized
 
 
@@ -3344,7 +3477,7 @@ def build_next_step_stub(candidate: dict[str, Any]) -> dict[str, Any] | None:
         guard_condition = constraints[0] if constraints else "無関係な変更や一度きりの作業では実行しない"
         return {
             "kind": "hook",
-            "prompt": f"「{label} を hook にしてください」と次セッションで指示",
+            "prompt": f"「{label} を hook として設定しますか？」",
             "trigger_event": trigger_event,
             "target_tools": tool_names,
             "action_summary": action_summary,
@@ -3355,10 +3488,10 @@ def build_next_step_stub(candidate: dict[str, Any]) -> dict[str, Any] | None:
     role_summary = representative_examples[0] if representative_examples else f"{label} を継続的に補助する"
     return {
         "kind": "agent",
-        "prompt": f"「{label} を agent にしてください」と次セッションで指示",
+        "prompt": f"「{label} をエージェントとして作成しますか？」",
         "role_summary": role_summary,
         "behavior_rules": behavior_rules,
-        "trigger": "同種の依頼が続く時に呼び出し、振る舞いを固定化する",
+        "trigger": "同種の依頼が続く時に呼び出し、一貫した振る舞いを提供する",
     }
 
 
@@ -3667,10 +3800,23 @@ def _ready_state_guard_reasons(candidate: dict[str, Any]) -> list[str]:
     return reasons
 
 
+_CONFIDENCE_SORT_PRIORITY = {"strong": 0, "medium": 1, "weak": 2}
+
+
+def _ready_candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int]:
+    """Sort ready candidates by confidence tier (strong first), then total_packets descending."""
+    conf = str(candidate.get("confidence") or "").strip()
+    support = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
+    total = int(support.get("total_packets", 0)) if support else 0
+    return (_CONFIDENCE_SORT_PRIORITY.get(conf, 3), -total)
+
+
 def build_proposal_sections(
     prepare_payload: dict[str, Any],
     judgments_by_candidate_id: dict[str, dict[str, Any]] | None = None,
     classifications_by_candidate_id: dict[str, dict[str, Any]] | None = None,
+    *,
+    markdown_classification_detail: bool = False,
 ) -> dict[str, Any]:
     judgments_by_candidate_id = judgments_by_candidate_id or {}
     classifications_by_candidate_id = classifications_by_candidate_id or {}
@@ -3738,7 +3884,15 @@ def build_proposal_sections(
         if isinstance(packet, dict):
             rejected.append(annotate_unclustered_packet(packet))
 
-    markdown = build_proposal_markdown(ready, needs_research, rejected, metadata=prepare_payload)
+    ready.sort(key=_ready_candidate_sort_key)
+
+    markdown = build_proposal_markdown(
+        ready,
+        needs_research,
+        rejected,
+        metadata=prepare_payload,
+        markdown_classification_detail=markdown_classification_detail,
+    )
     selection_prompt = "どの候補をドラフト化しますか？番号か候補名で指定してください。" if ready else None
     decision_log_stub = [build_candidate_decision_stub(candidate) for candidate in ready + needs_research + rejected]
     learning_feedback = build_learning_feedback(
@@ -3754,6 +3908,7 @@ def build_proposal_sections(
         "rejected": rejected,
         "selection_prompt": selection_prompt,
         "markdown": markdown,
+        "markdown_classification_detail": markdown_classification_detail,
         "decision_log_stub": decision_log_stub,
         "learning_feedback": learning_feedback,
         "observation_contract": observation_contract,
@@ -3941,6 +4096,7 @@ def build_proposal_markdown(
     rejected: list[dict[str, Any]],
     *,
     metadata: dict[str, Any] | None = None,
+    markdown_classification_detail: bool = False,
 ) -> str:
     lines: list[str] = []
     lines.append("### 観測範囲")
@@ -3949,10 +4105,17 @@ def build_proposal_markdown(
     if degraded_lines:
         lines.extend(degraded_lines)
     lines.append("")
-    lines.append("## 提案（固定化を推奨）")
+    lines.append("## 提案（アクション候補）")
     if ready:
         for index, candidate in enumerate(ready, start=1):
-            lines.extend(proposal_item_lines(index, candidate, include_classification=True))
+            lines.extend(
+                proposal_item_lines(
+                    index,
+                    candidate,
+                    include_classification=True,
+                    markdown_classification_detail=markdown_classification_detail,
+                )
+            )
     else:
         lines.append("今回は有力候補なし")
         detected_count = _detected_candidate_count(metadata, ready, needs_research, rejected)
@@ -4026,14 +4189,49 @@ def build_skill_scaffold_summary_lines(candidate: dict[str, Any]) -> list[str]:
     return lines
 
 
-def proposal_item_lines(index: int, candidate: dict[str, Any], *, include_classification: bool) -> list[str]:
+_KIND_DISPLAY_LABELS: dict[str, str] = {
+    "CLAUDE.md": "種類: プロジェクト設定（CLAUDE.md）",
+    "skill": "種類: 再利用スキル",
+    "hook": "種類: 自動チェック（hook）",
+    "agent": "種類: 専用エージェント",
+}
+
+_KIND_ACTION_LINES: dict[str, tuple[str, str]] = {
+    "CLAUDE.md": (
+        "プロジェクト設定に追加すれば、毎回の指示が不要になります",
+        "すぐに CLAUDE.md に追加できます",
+    ),
+    "skill": (
+        "再利用コマンドとして保存すれば、同じ作業を素早く再現できます",
+        "/skill-creator で生成できます",
+    ),
+    "hook": (
+        "自動チェックとして設定すれば、手動確認が不要になります",
+        "この場で hook を作成できます",
+    ),
+    "agent": (
+        "専用エージェントとして作成すれば、この役割を任せられます",
+        "この場でエージェントを作成できます",
+    ),
+}
+
+
+def proposal_item_lines(
+    index: int,
+    candidate: dict[str, Any],
+    *,
+    include_classification: bool,
+    markdown_classification_detail: bool = False,
+) -> list[str]:
     lines = [f"{index}. {candidate.get('label', 'Unnamed candidate')}"]
     if include_classification:
-        lines.append(f"   固定先: {candidate.get('suggested_kind', 'TBD')}")
+        kind = str(candidate.get("suggested_kind") or "TBD").strip()
+        kind_label = _KIND_DISPLAY_LABELS.get(kind, f"種類: {kind}")
+        lines.append(f"   {kind_label}")
         source = str(candidate.get("suggested_kind_source") or "").strip()
         if source in {"llm", "guardrail_override"}:
             trace = candidate.get("classification_trace")
-            if isinstance(trace, list):
+            if markdown_classification_detail and isinstance(trace, list):
                 trace_parts = []
                 for item in trace:
                     if not isinstance(item, dict):
@@ -4045,8 +4243,14 @@ def proposal_item_lines(index: int, candidate: dict[str, Any], *, include_classi
                 if trace_parts:
                     lines.append(f"   分類トレース: {' / '.join(trace_parts)}")
             reason = str(candidate.get("suggested_kind_reason") or "").strip()
-            if reason:
-                lines.append(f"   分類理由: {reason}")
+            if markdown_classification_detail:
+                if reason:
+                    lines.append(f"   分類理由: {reason}")
+            else:
+                kind = str(candidate.get("suggested_kind") or "").strip() or "?"
+                src_label = "llm" if source == "llm" else "guardrail"
+                short = reason if len(reason) <= 120 else (reason[:117] + "...")
+                lines.append(f"   分類: 最終={kind}（{src_label}）" + (f" — {short}" if short else ""))
     _CONFIDENCE_LABELS = {
         "strong": "確度: 高い — 複数セッション・複数ソースで繰り返し観測",
         "medium": "確度: 中程度 — 複数セッションで出現、もう少し定着を見たい",
@@ -4057,6 +4261,13 @@ def proposal_item_lines(index: int, candidate: dict[str, Any], *, include_classi
     if _conf_label is None:
         _conf_display = candidate.get("confidence", "不明")
         _conf_label = f"確度: {_conf_display}"
+    _prior_state = candidate.get("prior_decision_state") if isinstance(candidate.get("prior_decision_state"), dict) else {}
+    _prior_obs = int(_prior_state.get("observation_count", 0)) if _prior_state else 0
+    _support_for_delta = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
+    _current_obs = int(_support_for_delta.get("total_packets", 0)) if _support_for_delta else 0
+    _obs_delta = _current_obs - _prior_obs if _prior_obs > 0 else 0
+    if _obs_delta > 0:
+        _conf_label = f"{_conf_label}（前回比 +{_obs_delta} 観測）"
     lines.append(f"   {_conf_label}")
     support = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
     total_packets = support.get("total_packets")
@@ -4112,8 +4323,13 @@ def proposal_item_lines(index: int, candidate: dict[str, Any], *, include_classi
         ]
         if resolved_flags:
             lines.append(f"   追加調査で確認済み: {', '.join(resolved_flags[:4])}")
-        lines.append(f"   期待効果: {candidate.get('label', 'この候補')} の再利用フローを安定化できる")
-        lines.append("   → この作法を固定すれば、毎回の指示が不要になります")
+        _kind = str(candidate.get("suggested_kind") or "").strip()
+        _action = _KIND_ACTION_LINES.get(_kind)
+        if _action:
+            lines.append(f"   効果: {_action[0]}")
+            lines.append(f"   → {_action[1]}")
+        else:
+            lines.append(f"   効果: {candidate.get('label', 'この候補')} を再利用可能にできます")
     elif isinstance(judgment, dict):
         lines.append(f"   現状: {judgment.get('summary', candidate.get('confidence_reason', '追加調査が必要'))}")
         if candidate_split_suggestions(candidate):
@@ -4193,9 +4409,9 @@ def build_skill_scaffold_context(candidate: dict[str, Any]) -> dict[str, Any]:
     evidence_items = candidate.get("evidence_items", [])
     support = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
 
-    goal = f"{label} を再利用可能なスキルとして固定化する"
+    goal = f"{label} を再利用可能なスキルとして保存する"
     if task_shapes:
-        goal = f"{task_shapes[0].replace('_', ' ')} ベースの {label} を再利用可能なスキルとして固定化する"
+        goal = f"{task_shapes[0].replace('_', ' ')} ベースの {label} を再利用可能なスキルとして保存する"
 
     execution_hints: list[str] = []
     if artifact_hints:

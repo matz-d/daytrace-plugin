@@ -68,10 +68,12 @@ SESSION_TMP="${SESSION_TMP:-$(mktemp -d "${TMPDIR:-/tmp}/daytrace-session-XXXXXX
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_research_judge.py --candidate-file "$SESSION_TMP/prepare.json" --candidate-id "<id>" --detail-file "$SESSION_TMP/detail.json"
 ```
 
-Phase 3 Classification（`ready` + `needs_research` の各候補。オーバーレイは任意）:
+Phase 3 Classification（`ready` / `needs_research` の**曖昧候補のみ**に LLM overlay。オーバーレイは任意）:
 
+- **対象の絞り込み**は `skills/skill-miner/references/classify-target-selection.md` を正とする（開発リポジトリ全体では `docs/skill-miner-classify-targets.md` と同一内容）。`rejected` は原則 overlay を作らない
+- 明らかな `hook`・強い `CLAUDE.md` シグナルでヒューリスティックが閉じている候補は overlay を省略してよい
 - 契約と few-shot は `skills/skill-miner/references/classification-prompt.md` を正とする
-- 1 候補 1 ファイル（例: `$SESSION_TMP/classifications/<candidate_id>.json`）を親エージェントまたは子サブエージェントが生成する
+- 1 候補 1 ファイル（例: `$SESSION_TMP/classifications/<candidate_id>.json`）を親エージェントまたは子サブエージェントが**対象候補に限って**生成する
 
 Phase 3 Proposal:
 
@@ -87,7 +89,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py \
   > "$SESSION_TMP/proposal.json"
 ```
 
-`--classification-file` は存在するオーバーレイごとに繰り返す。オーバーレイが無い場合は引数ごと省略してよい（Python heuristic のみで proposal を組み立てる）。
+`--classification-file` は存在するオーバーレイごとに繰り返す（**絞り込んだ候補だけ**に対応するファイルだけ渡す）。オーバーレイが無い候補は引数を省略してよい（Python heuristic + guardrail のみで proposal を組み立てる）。詳細な分類トレースを markdown に載せる場合のみ `--markdown-classification-detail` を付ける（既定は圧縮表示。`ready[]` の JSON は常にフル contract）。
 
 Phase 3 Decision Writeback (conditional):
 
@@ -179,12 +181,13 @@ Phase 1 完了直後、Phase 2 に入る前に「今日の DayTrace ダイジェ
    - 満たす場合: 各 `needs_research` 候補の `research_targets` 上位 refs で `skill_miner_detail.py` → `skill_miner_research_judge.py` を自動実行する
    - 1 候補あたり最大 5 refs、追加調査は 1 回まで
 4. **Classification（prepare 後・proposal 前）**:
-   - `triage_status` が `ready` または `needs_research` の候補を対象とし（`rejected` は原則スキップ）、候補ごとに `classification-prompt.md` の contract に従った overlay JSON を 1 ファイル生成する
-   - 実行主体は親エージェントを既定とし、長い場合は子サブエージェントへ候補単位で委譲してよい
+   - `classify-target-selection.md` の規準に従い、**曖昧な** `ready` / `needs_research` 候補にだけ `classification-prompt.md` の overlay JSON を 1 候補 1 ファイル生成する（`rejected` は原則スキップ。明らかな hook / 強い CLAUDE.md は省略可）
+   - 実行主体は親エージェントを既定とし、長い場合は子サブエージェントへ**対象候補単位**で委譲してよい
    - `suggested_kind` は Python の `infer_suggested_kind()` が事前付与済みであることが多い。LLM は evidence に基づき override してよいが、明確な理由がない限り heuristic を尊重する（Pre-Classification Contract 参照）
    - `agent` は guardrail で落とされることがある。証跡が弱いときは保守的な分類・`confidence: low` を付けてよい
+   - 判断ログに **classify した件数 / 対象に含めた規準** を 1 行で残す（例: `classify 2/6、skill-agent 境界と弱確信のみ`）
 5. 提案の組み立て:
-    - prepare 出力・judge 出力（あれば）・**全 classification overlay（あれば）** を `skill_miner_proposal.py` に渡す（`--classification-file` を候補ごとに繰り返す）。stdout を shell redirect で `$SESSION_TMP/proposal.json` に保存する
+    - prepare 出力・judge 出力（あれば）・**生成した classification overlay（あれば）** を `skill_miner_proposal.py` に渡す（`--classification-file` を**作ったファイルだけ**繰り返す）。stdout を shell redirect で `$SESSION_TMP/proposal.json` に保存する
     - `proposal.json` は machine-actionable JSON（contract 詳細は `skill-miner/references/proposal-json-contract.md`）
     - ユーザー向けには `markdown` フィールドを出力する
     - structured judgment log では `observation_contract` を正として使う
@@ -330,7 +333,7 @@ Phase 2 (daily-report):
 
 Phase 3 Mining (skill-miner):
 - 分類は `CLAUDE.md` / `skill` / `hook` / `agent` の 4 つのみ。`plugin` は使わない
-- `suggested_kind` は Python 事前付与が基本。`classification-prompt.md` に従う overlay で LLM が上書きしてよい。override は理由記録が必須
+- `suggested_kind` は Python 事前付与が基本。`classification-prompt.md` に従う overlay で LLM が上書きしてよい（**曖昧候補のみ** overlay を生成）。override は理由記録が必須
 - `oversized_cluster` 等の blocking signal が未解消なら `ready` に入れない
 - `origin_hint` / `user_signal_strength` / `contamination_signals` に internal-signal guard が出ている候補は、legacy metadata 欠落 (`origin_hint=""`) を除き `ready` に上げない
 - proposal の根拠は `evidence_items[]` だけで完結させ、raw history を再読込しない
@@ -374,7 +377,7 @@ Phase 4 (post-draft):
 | 続行 vs 停止 | success >= 1 | 続行 | 空日報 → Phase 5 |
 | 共有用追加 | mode 未指定 & total_groups >= 5 | 両方生成 | 自分用のみ |
 | 追加調査実行 | needs_research >= 1 | detail + judge 自動実行 | スキップ |
-| 分類判定 | prepare の heuristic が事前付与 | classification overlay で LLM が上書き可（理由必須）。overlay 無し・破損時は heuristic のみ | guardrail で最終確定 |
+| 分類判定 | prepare の heuristic が事前付与 | **曖昧候補のみ** overlay。無い候補は heuristic + guardrail。overlay 破損時は heuristic のみ | guardrail で最終確定 |
 | contamination guard | `origin_hint/user_signal_strength/contamination_signals` を確認 | internal 疑いなら `needs_research` に留める | そのまま継続 |
 | 固定化アクション | `CLAUDE.md` → diff preview / `skill` → scaffold | 該当アクションを表示 | hook/agent は次セッションへ |
 | 投稿下書き | AI + Git 共起 or groups >= 4 | 生成 | スキップ |
