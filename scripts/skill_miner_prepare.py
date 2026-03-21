@@ -1746,6 +1746,12 @@ def cluster_packets(packets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
             unclustered.append(annotate_unclustered_packet(group_packets[0]))
             continue
         timestamps = [str(packet.get("timestamp") or "") for packet in group_packets if packet.get("timestamp")]
+        workspace_strs = [
+            str(packet.get("workspace") or "").strip() for packet in group_packets if str(packet.get("workspace") or "").strip()
+        ]
+        workspace_counter = Counter(workspace_strs)
+        dominant_workspace = workspace_counter.most_common(1)[0][0] if workspace_counter else None
+        workspace_paths = sorted(set(workspace_strs))[:12]
         support = {
             "total_packets": len(group_packets),
             "claude_packets": sum(1 for packet in group_packets if packet.get("source") == CLAUDE_SOURCE),
@@ -1799,6 +1805,8 @@ def cluster_packets(packets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
                 }
             ),
             "score": 0.0,
+            "dominant_workspace": dominant_workspace,
+            "workspace_paths": workspace_paths,
             "support": support,
             "common_task_shapes": task_shapes,
             "common_tool_signatures": tool_signatures,

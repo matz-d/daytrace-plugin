@@ -252,9 +252,47 @@ def safe_slug(value: str) -> str:
     return slug[:64] or "skill-handoff"
 
 
-def safe_timestamp_fragment(value: str) -> str:
-    fragment = "".join(char for char in value if char.isalnum())
-    return fragment or "unknown-time"
+def finalize_skill_handoff_presentation(handoff: dict[str, Any], context_file: str) -> None:
+    """Fill presentation_block after context_file path is known (schema v2 UX)."""
+    cross = bool(handoff.get("cross_repo"))
+    target = str(handoff.get("target_workspace_hint") or "").strip() or "（ログの workspace を確認）"
+    current = handoff.get("current_workspace")
+    current_label = str(current).strip() if current else "（未設定 / 全日程観測）"
+    lines = ["```text"]
+    if cross:
+        lines.append("この候補は別リポジトリ向けです。現在の CWD ではなく、対象リポジトリを開いてから適用してください。")
+    else:
+        lines.append("この候補は観測したリポジトリ向けです。開いているプロジェクトが一致しているか確認してください。")
+    lines.extend(
+        [
+            "",
+            f"target repo: {target}",
+            f"current workspace (観測時 --workspace): {current_label}",
+            f"handoff file: {context_file}",
+            "",
+            "実行すること:",
+        ]
+    )
+    if cross:
+        lines.extend(
+            [
+                "1. 対象リポジトリを開く（上記 target repo）",
+                "2. そのルートで /skill-creator を実行する",
+                "3. この JSON の context をプロンプトに含める",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "1. 適用先リポジトリを開く",
+                "2. /skill-creator を実行し、この handoff の scaffold を渡す",
+            ]
+        )
+    cd_hint = handoff.get("target_workspace_hint")
+    if cross and isinstance(cd_hint, str) and cd_hint.startswith("/"):
+        lines.extend(["", f"例: cd {cd_hint}"])
+    lines.append("```")
+    handoff["presentation_block"] = "\n".join(lines)
 
 
 def persist_skill_creator_handoffs(
@@ -278,19 +316,22 @@ def persist_skill_creator_handoffs(
                 continue
             skill_name = str(context.get("skill_name") or candidate.get("label") or f"skill-{index}")
             candidate_id = str(candidate.get("candidate_id") or f"candidate-{index}")
-            file_name = f"{safe_timestamp_fragment(recorded_at)}-{safe_slug(skill_name)}-{safe_slug(candidate_id)}.json"
+            # latest-wins per candidate_id: stable name avoids duplicate handoff files on re-run
+            file_name = f"handoff-{safe_slug(candidate_id)}.json"
             bundle_path = handoff_dir / file_name
+            updated_handoff = dict(handoff)
+            finalize_skill_handoff_presentation(updated_handoff, str(bundle_path))
             bundle = {
+                "handoff_schema_version": 2,
                 "record_type": "skill_creator_handoff",
                 "recorded_at": recorded_at,
                 "candidate_id": candidate.get("candidate_id"),
                 "label": candidate.get("label"),
                 "suggested_kind": candidate.get("suggested_kind"),
                 "context": context,
-                "handoff": handoff,
+                "handoff": updated_handoff,
             }
             bundle_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            updated_handoff = dict(handoff)
             updated_handoff["context_file"] = str(bundle_path)
             updated_handoff["context_format"] = "json"
             candidate["skill_creator_handoff"] = updated_handoff

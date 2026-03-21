@@ -187,10 +187,41 @@ mode によって構成と文体を変えるが、どちらも date-first の日
   - `aggregate.py を修正` → `ログ集約処理を改善`
   - 固有名（ファイル名、commit hash、diff 行数）は根拠に退避し、本文では意味だけ出す
 - 根拠は短文化する
-  - `git commit 7daded3c（+65/-21）` → `Git の修正履歴`
-  - `codex-history「P1 → P2 → ... 着手して」` → `AI 会話ログでの修正方針`
-  - `Chrome 閲覧ログ https://example.com/...` → `ブラウザでの調査ログ`
+  - `git commit 7daded3c（+65/-21）` → `Git の変更履歴`
+  - `codex-history「P1 → P2 → ... 着手して」` → `Codex の会話ログ`
+  - `Chrome 閲覧ログ https://example.com/...` → `ブラウザの閲覧履歴`
   - commit hash、差分行数、生の会話引用はできるだけ直接出さない
+- source 名の表示名は `daytrace-session/SKILL.md` の Chat Output Policy「Source 名の正規化」マッピングに従う
+
+#### 共有用・本文で避ける内部語（meaning-first 置換）
+
+共有用本文では、repo 内部の作業名・仮名・ issue 名・ docs 名をそのまま主語にしない。読者に伝わる行動レベル語へ置き換える。
+
+- `classification refresh plan` → `分類ロジック改善計画`
+- `output-polish` → `出力品質改善`
+- `skill-miner` → `パターン提案機能`
+- `daytrace-plugin` → `DayTrace プラグイン`
+- `phase 2 content_key readback` → `継続判定の整合性改善`
+
+**NG:** `classification refresh plan を実装した`
+
+**OK:** `分類ロジック改善計画を実装した`
+
+**NG:** `output-polish の docs を整備した`
+
+**OK:** `出力品質改善のドキュメントを整備した`
+
+#### 自分用・根拠の禁止パターン（negative example）
+
+自分用でも、機微・ノイズになりやすい次の形は **根拠に書かない**（意味へ要約する）。
+
+- 実ファイルパス・ホームディレクトリ（`/Users/...`, `/home/...`, `C:\Users\...`, `~/` 等）
+- セッション行のコピペに近い英文（例: `Codex session in /Users/you/projects/foo で…`）
+- ツールの内部メッセージに近い定型（例: `Continuing autonomously` を根拠文に含める）
+
+**NG:** `根拠: Codex session in /Users/alice/projects/daytrace で設定を直した`
+
+**OK:** `根拠: Codex の会話ログでの設定修正のやり取り`
 
 ### 自分用
 
@@ -233,6 +264,8 @@ mode によって構成と文体を変えるが、どちらも date-first の日
   - 主要活動: 「今日の中心作業」として前に出す
   - 補助活動: 「周辺整理」「次フェーズ準備」として控えめに扱う
   - 全項目を同じ重さで並べない
+- 内部のコードネームや作業用ラベルではなく、外から見て意味が分かる成果名で書く
+- `今日の概要` の 1 文目で「何を良くしたか」を先に言い、内部の実装名は根拠一覧へ退避する
 
 推奨カテゴリ:
 

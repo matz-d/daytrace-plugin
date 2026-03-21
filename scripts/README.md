@@ -342,6 +342,7 @@ Purpose:
 
 - accepts prepare output and optional research judgments
 - optionally accepts classification overlays for LLM-first kind selection experiments
+- skill handoff bundles use `handoff_schema_version: 2`, stable filenames `handoff-{candidate_id}.json` (latest-wins per candidate), and `presentation_block` for target-repo UX
 - returns final `ready` / `needs_research` / `rejected` proposal sections and markdown
 - renders the evidence chain directly from `candidates[].evidence_items[]`
 - does not reload raw history

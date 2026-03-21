@@ -32,7 +32,10 @@
 
 - DayTrace は scaffold context を proposal markdown では構造化テキストとして提示し、skill-creator を自動起動しない
 - `skill_miner_proposal.py --skill-creator-handoff-dir <dir>` を付けた場合は、ready な `skill` candidate ごとに JSON handoff bundle を 1 ファイル保存する
-- 保存される bundle には少なくとも `record_type`, `recorded_at`, `candidate_id`, `label`, `suggested_kind`, `context`, `handoff` が入る
+- 保存される bundle には `handoff_schema_version`（2）, `record_type`, `recorded_at`, `candidate_id`, `label`, `suggested_kind`, `context`, `handoff` が入る
+- `handoff` 内の `presentation_block`（コードフェンス付き）をそのままユーザーに見せてよい（target repo / handoff file / 手順の 3 点セット）
+- ファイル名は `handoff-{candidate_id}.json` で **同一 candidate の再実行は上書き**（latest-wins）
+- cross-repo の判定とフィールド一覧は `skills/skill-miner/references/cross-repo-handoff.md`
 - persisted handoff path は `skill_creator_handoff.context_file` として返り、監査や手渡し再利用に使える
 - ユーザーが `/skill-creator` を呼ぶ際に context を参照して渡す
 - proposal markdown の末尾に以下のガイドを表示する:

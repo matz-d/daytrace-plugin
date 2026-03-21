@@ -234,14 +234,14 @@ B0 観測の方法と優先順位ルールは `references/b0-observation.md` を
 |-----------|-----|--------|
 | `ready[]` | candidate objects | skill-applier が適用アクションに使う |
 | `ready[].skill_scaffold_context` | object | skill scaffold draft の構造化入力 |
-| `ready[].skill_creator_handoff` | object | skill-creator への handoff prompt + context_file |
+| `ready[].skill_creator_handoff` | object | skill-creator への handoff（**schema v2**: `cross_repo` / `target_workspace_hint` / `presentation_block` 等。`references/cross-repo-handoff.md`） |
 | `ready[].next_step_stub` | object | hook/agent 設計案の構造化入力 |
 | `markdown` | string | ユーザー向け提案表示（人間可読ビュー） |
 | `selection_prompt` | string\|null | 候補選択プロンプト（ready > 0 の時のみ） |
 | `decision_log_stub[]` | objects | decision writeback + carry-forward |
 | `observation_contract` | object | 観測条件メタデータ |
 | `learning_feedback` | object | 0 件時の成長シグナル |
-| `summary` | object | `ready_count`, `needs_research_count`, `rejected_count` |
+| `summary` | object | `ready_count`, `needs_research_count`, `rejected_count`, `triaged_total` |
 | `persistence` | object | decision_log / handoff の書き込み結果 |
 
 フィールド定義の詳細は `references/proposal-json-contract.md` を参照する。
@@ -257,14 +257,52 @@ B0 観測の方法と優先順位ルールは `references/b0-observation.md` を
 ```text
 | # | 候補 | 種類 | 確度 | 効果 | アクション |
 |---|------|------|------|------|-----------|
-| 1 | {label} | CLAUDE.md / skill / hook / agent | {高い/中程度/まだ弱い 等} | {次回どう楽になるか一言} | {すぐ追加可 / skill-creator 等} |
+| 1 | {display_label} | CLAUDE.md / skill / hook / agent | {高い/中程度/まだ弱い 等} | {次回どう楽になるか一言} | {すぐ追加可 / skill-creator 等} |
 ```
 
 - **適用スコープ**（`workspace-local` / `global-personal`）は `docs/output-polish.md` §9-4 の任意メタ。表に列として必須にしない。本文や注記で短く付けてもよい
 - `/skill-miner` 単体実行時も、チャット切れ防止のため同じく `proposal.md` へ保存することを推奨
 
-proposal の冒頭には観測範囲を明示し、3 区分で返す。
+### Display Label Rules
+
+`proposal.json` の `label` フィールドは carry-forward の identity key として Python が生成する（変更しない）。
+LLM は `ready[]` / `needs_research[]` の各候補を表示する直前に、**表示専用の `display_label`** を生成してから使う。
+
+生成ルール:
+- `label` / `representative_examples` / `task_shapes` / `artifact_hints` / `evidence_items[].summary` を読む
+- 8〜20 文字の「再利用できる作業名」を命名する
+- 形式: 体言止めの名詞句（動詞終わりにしない）
+- 適用後の行動・成果が見える名前にする
+- 内部語・ファイル名・生発話をそのまま使わない。意味ベースに翻訳する
+  - `classification refresh plan` → `分類ロジック改善計画`
+  - `output-polish` → `出力品質改善`
+  - `skill_miner_prepare.py` → `パターン抽出準備`
+
+良い例:
+- `週次振り返り評価プロンプト管理`
+- `DayTrace 出力 UX レビュー`
+- `新スレッド開始時の現在地整理`
+- `skill-miner 変更サマリ確認`
+
+避けるべき例（raw 発話断片のまま）:
+- `以下の出力結果をレビューしどのような改善を行ったら配布先のユーザーのUXが最大化するか提案してください` ← ×
+- `OK!では一週間の振り返りのものが揃いました。あ、まだか` ← ×
+
+`display_label` を使う箇所（表示のみ）:
+- compact 表の「候補」列
+- `proposal.md` の候補見出し（番号の直後）
+- selection prompt の候補一覧
+
+`display_label` を使わない箇所（identity）:
+- `proposal.json` の `label`（Python が生成する identity key。LLM は変更しない）
+- `decision_key` / `content_key` の材料（`label` を使用。`display_label` は無関係）
+
+proposal の冒頭には観測範囲を明示し、Python 生成の `候補内訳` 1 行（適用 / 追加観測 / 観測ノート / 合計）の直後に 3 区分の本文が続く。
 内部 triage key（`ready` / `needs_research` / `rejected`）はそのままで、ユーザー向け見出しだけを変更する。
+
+チャットの「候補 ○ 件」や「○ 件中 △ 件を提案」は **`skill_miner_proposal.py` の stdout（`proposal.json`）の `summary.triaged_total` と `summary.ready_count`** を使う。`prepare.json` の `summary.total_candidates` だけを根拠にすると、分割・材料化・メタ欠落で **合計 0 と ready 7 のような不整合**が起きうる。
+
+`skill` 行の compact 表に **適用先** を足してよい（`別リポジトリ` / `現在のリポジトリ`）。詳細は proposal 本文の `適用先:` と `skill_creator_handoff.presentation_block`（永続化後）。
 
 `intent_trace` ルール:
 
@@ -282,7 +320,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 
 ## 提案（アクション候補）
 
-1. 候補名
+1. {display_label}（※ `label` から LLM が生成する表示名。8〜20 文字の再利用可能な作業名）
    固定先: skill
    確度: 中程度 — 複数セッションで出現、もう少し定着を見たい
    根拠:
@@ -324,10 +362,12 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 ### 観測範囲
 観測範囲: {workspace名} / 直近 {N}日間 / {source}
 
+> 候補内訳: 適用 0 / 追加観測 {needs_research_count} / 観測ノート {rejected_count}（合計 {triaged_total}）
+
 ## 提案（アクション候補）
 今回は有力候補なし
 
-検出候補数: {N}件中 0 件が提案条件を満たした
+検出候補数: {triaged_total}件中 0 件が提案条件を満たした
 見送り理由の傾向: {主な理由（例: 観測窓が短い / oversized cluster / セッション数が少ない）}
 候補が増える条件: {いつ再実行すると候補が出やすいか（例: 同じ workspace で 2-3 週間使い続けると反復パターンが明確化しやすい）}
 ```

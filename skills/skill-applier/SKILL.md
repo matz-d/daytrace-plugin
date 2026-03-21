@@ -34,7 +34,7 @@ JSON contract の全体像は `skills/skill-miner/references/proposal-json-contr
 - `ready[]` — 適用対象の候補リスト
 - `ready[].suggested_kind` — dispatch 分岐キー
 - `ready[].skill_scaffold_context` — skill scaffold draft の構造化入力（kind=skill）
-- `ready[].skill_creator_handoff` — skill-creator への handoff prompt + context_file（kind=skill）
+- `ready[].skill_creator_handoff` — skill-creator への handoff（`presentation_block` で target repo + 手順を提示。cross-repo は `references/skill-scaffold.md` / `skill-miner/references/cross-repo-handoff.md`）
 - `ready[].next_step_stub` — hook/agent 生成の構造化入力（kind=hook|agent）
 - `ready[].evidence_items[]` — 根拠表示用
 - `decision_log_stub[]` — decision writeback の対象
