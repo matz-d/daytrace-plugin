@@ -3227,6 +3227,160 @@ def build_skill_creator_handoff(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _resolved_workspace_path(raw: str | None) -> str | None:
+    if not raw or not str(raw).strip():
+        return None
+    text = str(raw).strip()
+    try:
+        return str(Path(text).expanduser().resolve())
+    except OSError:
+        return text
+
+
+def build_cross_repo_handoff_metadata(
+    candidate: dict[str, Any],
+    prepare_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Schema v2 fields for skill-creator handoff (cross-repo UX). Merged into skill_creator_handoff."""
+    prepare_payload = prepare_payload or {}
+    config = prepare_payload.get("config") if isinstance(prepare_payload.get("config"), dict) else {}
+    raw_current = config.get("workspace")
+    current_workspace = _resolved_workspace_path(str(raw_current).strip()) if isinstance(raw_current, str) and raw_current.strip() else None
+
+    dominant_workspace = _resolved_workspace_path(str(candidate.get("dominant_workspace") or "").strip() or None)
+
+    path_examples: list[str] = []
+    wp = candidate.get("workspace_paths")
+    if isinstance(wp, list):
+        for item in wp[:8]:
+            if isinstance(item, str) and item.strip():
+                rp = _resolved_workspace_path(item.strip())
+                if rp and rp not in path_examples:
+                    path_examples.append(rp)
+
+    support = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
+    try:
+        unique_ws = int(support.get("unique_workspaces", 0) or 0)
+    except (TypeError, ValueError):
+        unique_ws = 0
+
+    signals: list[str] = []
+    cross_repo = False
+    handoff_scope = "current_repo"
+    confidence = "low"
+    target_hint: str | None = None
+    resolution_note = ""
+
+    if current_workspace and dominant_workspace and dominant_workspace != current_workspace:
+        cross_repo = True
+        handoff_scope = "other_repo"
+        target_hint = dominant_workspace
+        signals.append("dominant_workspace_mismatch")
+        confidence = "high"
+        resolution_note = (
+            "クラスタの主たる workspace と観測時の --workspace が一致しません。"
+            " skill-creator は対象リポジトリを開いた状態で実行してください。"
+        )
+    elif current_workspace and path_examples:
+        outside = [
+            p
+            for p in path_examples
+            if p != current_workspace and not is_within_path(p, current_workspace)
+        ]
+        if outside:
+            cross_repo = True
+            handoff_scope = "other_repo"
+            target_hint = outside[0]
+            signals.append("packet_workspace_outside_config_workspace")
+            confidence = "medium"
+            resolution_note = (
+                "証跡の workspace の一部が観測時の workspace ルート外です。別リポジトリのログが混ざっている可能性があります。"
+            )
+    elif not current_workspace and dominant_workspace:
+        target_hint = dominant_workspace
+        signals.append("prepare_workspace_unset")
+        resolution_note = (
+            "観測に workspace フィルタが無い実行です。適用先はログ上の workspace を優先して確認してください。"
+        )
+        confidence = "low"
+    elif unique_ws >= 2 and not cross_repo:
+        signals.append("multi_workspace_cluster")
+        resolution_note = "同一クラスタ内に複数 workspace があります。適用先を手元で確認してください。"
+        confidence = "low"
+
+    if not cross_repo:
+        target_hint = target_hint or current_workspace or dominant_workspace
+        if not resolution_note:
+            resolution_note = "観測 workspace と同一リポジトリ向けの候補として扱っています。"
+
+    display_name: str | None = None
+    if target_hint:
+        try:
+            display_name = Path(target_hint).name or target_hint
+        except (OSError, ValueError, TypeError):
+            display_name = target_hint
+
+    if cross_repo:
+        execution_instruction = "\n".join(
+            [
+                "別リポジトリ向けの可能性が高いです。現在の CWD だけを信頼しないでください。",
+                f"1. 対象リポジトリを開く（推奨: {target_hint or 'ログの workspace を確認'}）",
+                "2. そのリポジトリをプロジェクトルートにした状態で /skill-creator を実行する",
+                "3. この handoff の context_file（JSON bundle）の scaffold をプロンプトに含める",
+            ]
+        )
+    else:
+        base = target_hint or current_workspace or "このリポジトリ"
+        execution_instruction = "\n".join(
+            [
+                f"1. 適用先のリポジトリを開く（目安: {base}）",
+                "2. /skill-creator を実行し、この handoff の scaffold 情報を渡す",
+            ]
+        )
+
+    meta = {
+        "handoff_schema_version": 2,
+        "cross_repo": cross_repo,
+        "target_workspace_hint": target_hint,
+        "current_workspace": current_workspace,
+        "handoff_scope": handoff_scope,
+        "execution_instruction": execution_instruction,
+        "workspace_resolution_note": resolution_note,
+        "cross_repo_confidence": confidence,
+        "detection_signals": signals,
+        "target_repo_display_name": display_name,
+        "target_path_examples": path_examples[:3],
+    }
+    return meta
+
+
+def merge_cross_repo_into_skill_handoff(
+    handoff: dict[str, Any],
+    candidate: dict[str, Any],
+    prepare_payload: dict[str, Any] | None,
+) -> None:
+    """Mutate skill_creator_handoff with schema v2 cross-repo fields and extended instructions."""
+    meta = build_cross_repo_handoff_metadata(candidate, prepare_payload)
+    handoff.update(meta)
+    base_instructions = [
+        "Open /skill-creator manually.",
+        "Pass the scaffold context alongside this prompt.",
+        "Let skill-creator produce the actual SKILL.md and any bundled resources.",
+    ]
+    handoff["instructions"] = [
+        meta["workspace_resolution_note"],
+        *meta["execution_instruction"].split("\n"),
+        *base_instructions,
+    ]
+    handoff["prompt"] = (
+        str(handoff.get("prompt") or "")
+        + "\n\n---\n"
+        + f"Handoff scope: {meta['handoff_scope']}\n"
+        + f"{meta['workspace_resolution_note']}\n\n"
+        + meta["execution_instruction"]
+    )
+
+
 def candidate_split_suggestions(candidate: dict[str, Any]) -> list[str]:
     split_suggestions = candidate.get("split_suggestions")
     if isinstance(split_suggestions, list) and split_suggestions:
@@ -3444,6 +3598,8 @@ def _materialize_split_candidates(parent: dict[str, Any]) -> list[dict[str, Any]
                     "parent_label": parent_label,
                     "split_label": split_label,
                 },
+                "dominant_workspace": parent.get("dominant_workspace"),
+                "workspace_paths": list(parent.get("workspace_paths") or []),
             }
         )
 
@@ -3839,7 +3995,9 @@ def build_proposal_sections(
                     if str(child.get("suggested_kind") or "") == "skill":
                         scaffold_context = build_skill_scaffold_context(child)
                         child["skill_scaffold_context"] = scaffold_context
-                        child["skill_creator_handoff"] = build_skill_creator_handoff(scaffold_context)
+                        skill_handoff = build_skill_creator_handoff(scaffold_context)
+                        merge_cross_repo_into_skill_handoff(skill_handoff, child, prepare_payload)
+                        child["skill_creator_handoff"] = skill_handoff
                     elif str(child.get("suggested_kind") or "") in {"hook", "agent"}:
                         next_step_stub = build_next_step_stub(child)
                         if next_step_stub is not None:
@@ -3869,7 +4027,9 @@ def build_proposal_sections(
             if str(candidate.get("suggested_kind") or "") == "skill":
                 scaffold_context = build_skill_scaffold_context(candidate)
                 candidate["skill_scaffold_context"] = scaffold_context
-                candidate["skill_creator_handoff"] = build_skill_creator_handoff(scaffold_context)
+                skill_handoff = build_skill_creator_handoff(scaffold_context)
+                merge_cross_repo_into_skill_handoff(skill_handoff, candidate, prepare_payload)
+                candidate["skill_creator_handoff"] = skill_handoff
             elif str(candidate.get("suggested_kind") or "") in {"hook", "agent"}:
                 next_step_stub = build_next_step_stub(candidate)
                 if next_step_stub is not None:
@@ -3893,7 +4053,7 @@ def build_proposal_sections(
         metadata=prepare_payload,
         markdown_classification_detail=markdown_classification_detail,
     )
-    selection_prompt = "今すぐ適用する候補を選んでください。番号を返すと適用フローに入ります。選ばなかった候補も次回以降の提案として保持されます。" if ready else None
+    selection_prompt = "候補番号を入力すると /skill-creator による登録フローが始まります。選ばなかった候補は次回以降も引き続き提案されます。複数登録したい場合は 1 つずつ選択してください。" if ready else None
     decision_log_stub = [build_candidate_decision_stub(candidate) for candidate in ready + needs_research + rejected]
     learning_feedback = build_learning_feedback(
         ready,
@@ -3916,6 +4076,7 @@ def build_proposal_sections(
             "ready_count": len(ready),
             "needs_research_count": len(needs_research),
             "rejected_count": len(rejected),
+            "triaged_total": len(ready) + len(needs_research) + len(rejected),
         },
     }
 
@@ -3948,12 +4109,12 @@ def _observation_scope_line(metadata: dict[str, Any] | None) -> str:
     return f"観測範囲: {workspace_label} / 直近 {days}日間 / {source_label}"
 
 
-def _detected_candidate_count(metadata: dict[str, Any] | None, ready: list[dict[str, Any]], needs_research: list[dict[str, Any]], rejected: list[dict[str, Any]]) -> int:
-    metadata = metadata or {}
-    summary = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else {}
-    total_candidates = summary.get("total_candidates")
-    if isinstance(total_candidates, int):
-        return total_candidates
+def _triaged_candidate_count(
+    ready: list[dict[str, Any]],
+    needs_research: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+) -> int:
+    """Rows after proposal triage (split materialization, unclustered → rejected). Canonical for chat headers."""
     return len(ready) + len(needs_research) + len(rejected)
 
 
@@ -4034,7 +4195,11 @@ def _observation_stats_lines(metadata: dict[str, Any] | None) -> list[str]:
     summary = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else {}
     config = metadata.get("config") if isinstance(metadata.get("config"), dict) else {}
     total_packets = summary.get("total_packets", 0)
-    total_candidates = summary.get("total_candidates", 0)
+    raw_candidates = metadata.get("candidates")
+    cand_n = len(raw_candidates) if isinstance(raw_candidates, list) else 0
+    ref_tc = summary.get("total_candidates")
+    ref_n = int(ref_tc) if isinstance(ref_tc, int) else 0
+    total_candidates = max(cand_n, ref_n)
     days = config.get("effective_days") or config.get("days") or "?"
     sources = metadata.get("sources") if isinstance(metadata.get("sources"), list) else []
     source_names = [
@@ -4105,6 +4270,11 @@ def build_proposal_markdown(
     if degraded_lines:
         lines.extend(degraded_lines)
     lines.append("")
+    triaged_total = _triaged_candidate_count(ready, needs_research, rejected)
+    lines.append(
+        f"> 候補内訳: 適用 {len(ready)} / 追加観測 {len(needs_research)} / 観測ノート {len(rejected)}（合計 {triaged_total}）"
+    )
+    lines.append("")
     lines.append("## 提案（アクション候補）")
     if ready:
         for index, candidate in enumerate(ready, start=1):
@@ -4118,7 +4288,7 @@ def build_proposal_markdown(
             )
     else:
         lines.append("今回は有力候補なし")
-        detected_count = _detected_candidate_count(metadata, ready, needs_research, rejected)
+        detected_count = _triaged_candidate_count(ready, needs_research, rejected)
         lines.append("")
         lines.extend(_observation_stats_lines(metadata))
         lines.append(f"検出候補数: {detected_count}件中 0 件が提案条件を満たした")
@@ -4152,7 +4322,7 @@ def build_proposal_markdown(
 
     if ready:
         lines.append("")
-        lines.append("今すぐ適用する候補を選んでください。番号を返すと適用フローに入ります。選ばなかった候補も次回以降の提案として保持されます。")
+        lines.append("候補番号を入力すると /skill-creator による登録フローが始まります。選ばなかった候補は次回以降も引き続き提案されます。複数登録したい場合は 1 つずつ選択してください。")
     return "\n".join(lines)
 
 
@@ -4223,7 +4393,17 @@ def proposal_item_lines(
     include_classification: bool,
     markdown_classification_detail: bool = False,
 ) -> list[str]:
-    lines = [f"{index}. {candidate.get('label', 'Unnamed candidate')}"]
+    # display_label: LLM が生成する表示専用ラベル。なければ Python の label にフォールバック。
+    _display = (candidate.get("display_label") or candidate.get("label") or "Unnamed candidate").strip()
+    # cross-repo 候補は title 行にマーカーを付ける（skill 種別のみ）
+    _handoff_meta = candidate.get("skill_creator_handoff")
+    _is_cross_repo = (
+        isinstance(_handoff_meta, dict)
+        and bool(_handoff_meta.get("cross_repo"))
+        and str(candidate.get("suggested_kind") or "") == "skill"
+    )
+    _title = f"{_display}  ＊別リポジトリ向け" if _is_cross_repo else _display
+    lines = [f"{index}. {_title}"]
     if include_classification:
         kind = str(candidate.get("suggested_kind") or "TBD").strip()
         kind_label = _KIND_DISPLAY_LABELS.get(kind, f"種類: {kind}")
@@ -4251,6 +4431,15 @@ def proposal_item_lines(
                 src_label = "llm" if source == "llm" else "guardrail"
                 short = reason if len(reason) <= 120 else (reason[:117] + "...")
                 lines.append(f"   分類: 最終={kind}（{src_label}）" + (f" — {short}" if short else ""))
+        handoff_scope = candidate.get("skill_creator_handoff")
+        if str(candidate.get("suggested_kind") or "") == "skill" and isinstance(handoff_scope, dict):
+            if handoff_scope.get("cross_repo"):
+                lines.append("   適用先: 別リポジトリ（現在の CWD ではなく、handoff の target repo で /skill-creator）")
+            elif str(handoff_scope.get("handoff_scope") or "") == "current_repo":
+                lines.append("   適用先: 現在のリポジトリ")
+            res_note = str(handoff_scope.get("workspace_resolution_note") or "").strip()
+            if res_note and len(res_note) <= 200:
+                lines.append(f"   workspace 注記: {res_note}")
     _CONFIDENCE_LABELS = {
         "strong": "確度: 高い — 複数セッション・複数ソースで繰り返し観測",
         "medium": "確度: 中程度 — 複数セッションで出現、もう少し定着を見たい",
@@ -4261,6 +4450,12 @@ def proposal_item_lines(
     if _conf_label is None:
         _conf_display = candidate.get("confidence", "不明")
         _conf_label = f"確度: {_conf_display}"
+    # display_confidence_reason: LLM が生成する候補固有の確度説明。
+    # 存在する場合はテンプレの "— …" 部分を置換する。
+    _display_conf_reason = str(candidate.get("display_confidence_reason") or "").strip()
+    if _display_conf_reason:
+        _conf_prefix = _conf_label.split(" — ")[0]  # "確度: 高い" などのプレフィックス
+        _conf_label = f"{_conf_prefix} — {_display_conf_reason}"
     _prior_state = candidate.get("prior_decision_state") if isinstance(candidate.get("prior_decision_state"), dict) else {}
     _prior_obs = int(_prior_state.get("observation_count", 0)) if _prior_state else 0
     _support_for_delta = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
