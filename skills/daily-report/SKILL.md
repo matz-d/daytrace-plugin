@@ -124,7 +124,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/daily_report_projection.py --date today --
 
 - `report-private.md` — 自分用日報
 - `report-share.md` — 共有用を生成した場合のみ（出さない場合はチャットで「共有用は未生成」と明示）
-- 親ディレクトリが無ければ作成してから保存する
+- 親ディレクトリが無ければ作成してから保存する（`daily_report_projection` は `output_dir` を返す前にコード側でも作成する。Write 前の再保証として同様の扱いでよい）
 - チャットには **要約・絶対パス・ファイル単位の成功/失敗** だけを返す
 
 ## Scope Contract

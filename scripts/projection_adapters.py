@@ -48,6 +48,12 @@ def artifact_output_paths(
     return report_date, output_dir
 
 
+def ensure_artifact_output_dir(output_dir: str | None) -> None:
+    """Create output_dir (mkdir -p) when Layer 3 artifact paths are in use."""
+    if output_dir:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+
 def _resolve_expected_sources(
     *,
     sources_file: str | None,
@@ -285,6 +291,7 @@ def build_projection_payload(
         resolved_since=resolved_since,
         resolved_until=resolved_until,
     )
+    ensure_artifact_output_dir(output_dir)
 
     payload: dict[str, Any] = {
         "status": "success",

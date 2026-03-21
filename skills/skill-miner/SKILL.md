@@ -252,7 +252,7 @@ B0 観測の方法と優先順位ルールは `references/b0-observation.md` を
 
 ### Chat-side compact 表（`daytrace-session` / `docs/output-polish.md` §6）
 
-統合セッションでは、チャットの第一画面を次の表形式にする（`ready[]` を 1 行ずつ埋める）。**全文の `markdown` は `output_dir` の `proposal.md` に保存**し、チャットには表＋一行要約＋パスを返す。
+統合セッションでは、チャットの第一画面を次の表形式にする（`ready[]` を 1 行ずつ埋める）。**全文の `markdown` は `output_dir` の `proposal.md` に保存**し、チャットには表＋一行要約＋パスを返す。保存時、親ディレクトリが無ければ作成する（`daily-report` と同様。Phase 1 の projection が `output_dir` をコード側で用意済みの場合も、Write 前に存在確認してよい）。
 
 ```text
 | # | 候補 | 種類 | 確度 | 効果 | アクション |

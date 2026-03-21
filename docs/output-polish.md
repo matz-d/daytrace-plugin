@@ -382,6 +382,7 @@ persisted intermediate artifact の保存先と命名規約を固定する。
 
 ルール:
 - ディレクトリが存在しない場合は作成する
+- 単日スコープで `output_dir` が JSON に付く **`daily_report_projection` / `post_draft_projection`** は、`projection_adapters.build_projection_payload` 経由で **返却前に `output_dir` を `mkdir -p` 相当で作成する**（`~/.daytrace` が未作成でもよい）。エージェント側の Write でも親ディレクトリ作成を指示する（二重でも無害）
 - 上書きはファイル単位で行う
 - 同日に複数回実行した場合は、対象ファイルのみ上書きする
 - 一部のファイルだけ更新されてもよい

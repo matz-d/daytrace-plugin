@@ -49,7 +49,7 @@ Phase 1 Data Collection:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/daily_report_projection.py --date today --all-sessions
 ```
 
-Phase 1 の JSON に `report_date` と `output_dir` が含まれる（単日スコープ時）。日報・投稿下書き・提案の Markdown artifact は `output_dir` へ保存する（`docs/output-polish.md` §7）。
+Phase 1 の JSON に `report_date` と `output_dir` が含まれる（単日スコープ時）。`output_dir` は projection が **返却前にディレクトリを作成済み**（`~/.daytrace` 未作成でも可）。日報・投稿下書き・提案の Markdown artifact はそこへ保存する（`docs/output-polish.md` §7）。各 skill でも Write 前に親ディレクトリが無ければ作成する。
 
 Phase 3 Post Draft (conditional):
 

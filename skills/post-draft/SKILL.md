@@ -127,6 +127,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/post_draft_projection.py --date today --al
 
 `output_dir` が非 null のとき、生成した narrative を `post-draft.md` に保存する。チャットには要約・パス・成否のみ返す。
 
+- 親ディレクトリが無ければ作成してから保存する（`daily-report` と同様。`daily_report_projection` / `post_draft_projection` は返却前に `output_dir` をコード側でも用意する）
+
 ## Scope Contract
 
 この skill は date-first だが、source には `all-day` と `workspace` の 2 種類がある。
