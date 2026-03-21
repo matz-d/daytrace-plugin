@@ -3,13 +3,13 @@ name: skill-miner
 description: >
   Claude / Codex 履歴から反復パターンや定着させたい作法を抽出し、
   recurring workflow / repeated instruction を
-  `CLAUDE.md` / `skill` / `hook` / `agent` のどれに固定すべきか評価して proposal を返す。
+  `CLAUDE.md` / `skill` / `hook` / `agent` のどれに適用すべきか評価して proposal を返す。
 user-invocable: true
 ---
 
 # Skill Miner
 
-AI 会話履歴を横断して、固定化すべき作法を `extract / classify / evaluate / propose` するための skill。
+AI 会話履歴を横断して、定着させたい作法を `extract / classify / evaluate / propose` するための skill。
 
 ## Goal
 
@@ -118,7 +118,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$S
 - `candidates` を 3 区分にトリアージする
 - 正式提案に進める候補だけを 4 分類へ仮分類する
 - `なぜこの候補か` と `なぜその分類か` を説明する
-- 固定化アクション（CLAUDE.md apply / skill scaffold / hook・agent 設計案）は `skill-applier` skill に委ねる
+- 適用アクション（CLAUDE.md apply / skill scaffold / hook・agent 設計案）は `skill-applier` skill に委ねる
 
 やってはいけないこと:
 
@@ -231,7 +231,7 @@ B0 観測の方法と優先順位ルールは `references/b0-observation.md` を
 
 | フィールド | 型 | 消費者 |
 |-----------|-----|--------|
-| `ready[]` | candidate objects | skill-applier が固定化アクションに使う |
+| `ready[]` | candidate objects | skill-applier が適用アクションに使う |
 | `ready[].skill_scaffold_context` | object | skill scaffold draft の構造化入力 |
 | `ready[].skill_creator_handoff` | object | skill-creator への handoff prompt + context_file |
 | `ready[].next_step_stub` | object | hook/agent 設計案の構造化入力 |
@@ -380,9 +380,9 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 - `reject_candidate`
   - `観測ノート` に移す
 
-## Fixation Actions
+## Apply Actions
 
-候補選択後の固定化アクション（CLAUDE.md apply / skill scaffold / hook・agent 設計案）は `skill-applier` skill が担う。
+候補選択後の適用アクション（CLAUDE.md apply / skill scaffold / hook・agent 設計案）は `skill-applier` skill が担う。
 詳細は `skills/skill-applier/SKILL.md` を参照する。
 
 ## Phase 3 classify 対象の絞り込み

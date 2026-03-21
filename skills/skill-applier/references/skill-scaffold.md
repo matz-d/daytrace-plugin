@@ -58,7 +58,7 @@
 - scaffold context を提示し、`done` が確認できた時だけ `--completion-state completed` を使う
 - 確認できない場合は `pending` のまま session を閉じる
 
-### `done` 確認フロー（`skill` 固定化）
+### `done` 確認フロー（`skill` 適用）
 
 `--completion-state completed` の使用条件は以下で固定する。
 

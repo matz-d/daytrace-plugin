@@ -31,7 +31,7 @@ JSON contract の全体像は `skills/skill-miner/references/proposal-json-contr
 
 本 skill が使う主要フィールド:
 
-- `ready[]` — 固定化対象の候補リスト
+- `ready[]` — 適用対象の候補リスト
 - `ready[].suggested_kind` — dispatch 分岐キー
 - `ready[].skill_scaffold_context` — skill scaffold draft の構造化入力（kind=skill）
 - `ready[].skill_creator_handoff` — skill-creator への handoff prompt + context_file（kind=skill）

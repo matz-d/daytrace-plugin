@@ -3893,7 +3893,7 @@ def build_proposal_sections(
         metadata=prepare_payload,
         markdown_classification_detail=markdown_classification_detail,
     )
-    selection_prompt = "どの候補をドラフト化しますか？番号か候補名で指定してください。" if ready else None
+    selection_prompt = "今すぐ適用する候補を選んでください。番号を返すと適用フローに入ります。選ばなかった候補も次回以降の提案として保持されます。" if ready else None
     decision_log_stub = [build_candidate_decision_stub(candidate) for candidate in ready + needs_research + rejected]
     learning_feedback = build_learning_feedback(
         ready,
@@ -3959,7 +3959,7 @@ def _detected_candidate_count(metadata: dict[str, Any] | None, ready: list[dict[
 
 def _no_ready_reason_summary(needs_research: list[dict[str, Any]], rejected: list[dict[str, Any]]) -> str:
     if any("oversized_cluster" in (candidate.get("quality_flags") or []) for candidate in needs_research if isinstance(candidate, dict)):
-        return "巨大クラスタが多く、用途が粗すぎて固定化候補にしにくい"
+        return "巨大クラスタが多く、用途が粗すぎて提案候補にしにくい"
     if needs_research:
         return "有望な候補はあるが、まだ意味のまとまりが弱い"
     if rejected:
@@ -4152,7 +4152,7 @@ def build_proposal_markdown(
 
     if ready:
         lines.append("")
-        lines.append("どの候補をドラフト化しますか？番号か候補名で指定してください。")
+        lines.append("今すぐ適用する候補を選んでください。番号を返すと適用フローに入ります。選ばなかった候補も次回以降の提案として保持されます。")
     return "\n".join(lines)
 
 

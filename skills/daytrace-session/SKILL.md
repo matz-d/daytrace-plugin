@@ -16,13 +16,13 @@ user-invocable: true
 - 各ステップで自己判断の理由を `[DayTrace]` プレフィックス付きで報告する
 - ソース欠損やデータ不足でも止まらず、できる範囲で最後まで進む
 - 最後に実施内容のサマリを返す
-- ready proposal がある時は、Phase 3 の固定化アクションまで閉じる
+- ready proposal がある時は、Phase 3 の適用アクションまで閉じる
 
 やらないこと:
 
 - 個別 skill の出力フォーマットや品質基準を上書きすること
 - `Escalation Conditions` 以外で途中 ask を増やすこと
-- フェーズ間で人の確認を待つこと（proposal 選択 / 固定化確認を除く）
+- フェーズ間で人の確認を待つこと（proposal 選択 / 適用確認を除く）
 
 ## Inputs
 
@@ -192,14 +192,14 @@ Phase 1 完了直後、Phase 2 に入る前に「今日の DayTrace ダイジェ
     - ユーザー向けには `markdown` フィールドを出力する
     - structured judgment log では `observation_contract` を正として使う
     - 近似入力判定は `observation_contract.input_fidelity == "approximate"`、adaptive window 判定は `observation_contract.adaptive_window.expanded` を参照する
-    - `ready[]` の `skill_scaffold_context` / `skill_creator_handoff` / `next_step_stub` は Step 7 の固定化アクションの構造化入力になる
+    - `ready[]` の `skill_scaffold_context` / `skill_creator_handoff` / `next_step_stub` は Step 7 の適用アクションの構造化入力になる
     - `ready` が 0 件の場合: `learning_feedback` を含む enriched output が自動生成され、そのまま Phase 4 へ進む
  6. ready proposal が 1 件以上ある場合だけ、proposal の `selection_prompt` を使って 1 回だけ候補選択を受け付けてよい（optional commit step — 応答がなければ pending のまま Phase 4 へ進む）
     - ユーザーが番号を答えた場合は、その番号を `skill_miner_decision.py --candidate-index <N>` に渡す
     - `candidate-index` は 1-based。数値であり、`1 <= N <= ready_count` を検証する
     - `defer` / `reject` を選んだ場合も `skill_miner_decision.py` で `user-decision-file` を生成する
     - 選択を受け付けなかった場合も Phase 3 は正常完了とし、全候補が `user_decision=null` で decision log に記録される
- 7. 自動判断 — 固定化アクション（`skill-applier` の Dispatch Rules に従う）:
+ 7. 自動判断 — 適用アクション（`skill-applier` の Dispatch Rules に従う）:
     - `suggested_kind == "CLAUDE.md"`: `references/claude-md-apply.md` に従い diff preview → apply
     - `suggested_kind == "skill"`: `references/skill-scaffold.md` に従い scaffold context を提示
     - `suggested_kind == "hook"` / `"agent"`: `references/hook-agent-nextstep.md` に従い設計案を提示 → 次セッションへ
@@ -244,19 +244,15 @@ Phase 1 完了直後、Phase 2 に入る前に「今日の DayTrace ダイジェ
 
 ### Phase 5: Session Summary
 
-最後に生成物の一覧と次のアクションを簡潔にまとめる。Phase 1.5 のダイジェスト（日の概観）と内容が重複しないように、ここでは成果物と次の一手に絞る。
+最後にセッション全体の成果と次の一手を散文 3-5 行でまとめる。Phase 1.5 のダイジェスト（日の概観）と内容が重複しないように、ここでは成果物と次の一手に絞る。箇条書きは使わず、読み流せる散文にする。
 
 ```
 [DayTrace] セッション完了
 
-### 生成物
-- 自分用日報（活動 N 項目）
-- 共有用日報（活動 N 項目）
-- パターン提案 Y 件（CLAUDE.md ×A, skill ×B）
-- 投稿下書き 1 本
-
-### 次のアクション
-- {Phase 3 で出た固定化アクションの要約}
+今日は N 件のソースから活動を収集し、{自分用/共有用}日報、パターン提案 Y 件、
+{投稿下書き 1 本 / 投稿下書きはスキップ}を生成しました。
+{提案のうち N 件はすぐに適用可能です。 / 今回は提案条件を満たす候補はありませんでした。}
+{次のアクションがあれば 1 文で。例: 候補 1 の CLAUDE.md 追加を進める場合は番号を返してください。}
 ```
 
 ## Output Order
@@ -269,7 +265,7 @@ Phase 1 完了直後、Phase 2 に入る前に「今日の DayTrace ダイジェ
 3. Phase 2 の判断ログ（1 行）+ 日報出力（`daily-report` SKILL.md の Output Rules に準拠）
 4. Phase 2 の共有用日報（条件付き）
 5. Phase 3 の判断ログ（1 行）+ 提案出力（`skill-miner` SKILL.md の Proposal Format に準拠。0 件でも enriched output を表示）
-6. Phase 3 の固定化アクション出力（条件付き: CLAUDE.md diff preview / skill scaffold context）
+6. Phase 3 の適用アクション出力（条件付き: CLAUDE.md diff preview / skill scaffold context）
 7. Phase 4 の判断ログ（1 行）+ 下書き出力（`post-draft` SKILL.md の Output Rules に準拠）
 8. Phase 5 のセッションサマリ（散文）
 
@@ -303,7 +299,7 @@ structured fields は内部トレースとしてのみ使用する:
 以下の場合のみ確認を入れてよい:
 
 - **共有用日報に機密情報が含まれる可能性がある場合**: `mode=共有用` かつ `sources[]` に `all-day` スコープのみ（workspace ログなし）の場合、「共有用日報に個人端末の全日ログが含まれますが、このまま進めますか？」と 1 回だけ確認
-- **ready proposal の固定化を進める場合**: proposal の `selection_prompt` に従う 1 回の候補選択と、固定化 action の完了確認を入れてよい
+- **ready proposal の適用を進める場合**: proposal の `selection_prompt` に従う 1 回の候補選択と、適用 action の完了確認を入れてよい
 - **CLAUDE.md 即時反映時**: 既存の仕様通り diff preview を出して確認を待つ
 - それ以外は ask せずに degrade して進む
 
@@ -313,7 +309,7 @@ structured fields は内部トレースとしてのみ使用する:
 
 - Phase 2: `skills/daily-report/SKILL.md` — Output Rules, Confidence Handling, Mixed-Scope Note Rules, Graceful Degrade
 - Phase 3 (Mining): `skills/skill-miner/SKILL.md` — Classification Rules, Pre-Classification Contract, Oversized Cluster Guard, Proposal Format, Deep Research Rules, Triage Rules
-- Phase 3 (Fixation): `skills/skill-applier/SKILL.md` — CLAUDE.md Immediate Apply, Skill Scaffold Draft, Hook/Agent Next Step, Decision Writeback
+- Phase 3 (Apply): `skills/skill-applier/SKILL.md` — CLAUDE.md Immediate Apply, Skill Scaffold Draft, Hook/Agent Next Step, Decision Writeback
 - Phase 4: `skills/post-draft/SKILL.md` — Narrative Policy, Reader Policy, Output Rules, Graceful Degrade
 
 本 skill は orchestration のみを担い、個別 skill の出力フォーマットや品質基準を上書きしない。
@@ -379,7 +375,7 @@ Phase 4 (post-draft):
 | 追加調査実行 | needs_research >= 1 | detail + judge 自動実行 | スキップ |
 | 分類判定 | prepare の heuristic が事前付与 | **曖昧候補のみ** overlay。無い候補は heuristic + guardrail。overlay 破損時は heuristic のみ | guardrail で最終確定 |
 | contamination guard | `origin_hint/user_signal_strength/contamination_signals` を確認 | internal 疑いなら `needs_research` に留める | そのまま継続 |
-| 固定化アクション | `CLAUDE.md` → diff preview / `skill` → scaffold | 該当アクションを表示 | hook/agent は次セッションへ |
+| 適用アクション | `CLAUDE.md` → diff preview / `skill` → scaffold | 該当アクションを表示 | hook/agent は次セッションへ |
 | 投稿下書き | AI + Git 共起 or groups >= 4 | 生成 | スキップ |
 
 ## Output Skeleton
@@ -399,7 +395,7 @@ Phase 4 (post-draft):
 
 [DayTrace] パターン検出: {summary line}
 {proposal markdown — 0件でも enriched output を含む}
-{固定化アクション出力 — 条件付き}
+{適用アクション出力 — 条件付き}
 
 [DayTrace] 投稿下書き: {summary line}
 {下書き本文 or スキップ理由}
