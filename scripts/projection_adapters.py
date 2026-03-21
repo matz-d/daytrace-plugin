@@ -31,6 +31,23 @@ DEFAULT_SOURCES_FILE = SCRIPT_DIR / "sources.json"
 HYDRATE_TIMEOUT_SEC = 90
 
 
+def artifact_output_paths(
+    *,
+    normalized_date: str | None,
+    resolved_since: str | None,
+    resolved_until: str | None,
+) -> tuple[str | None, str | None]:
+    """Canonical report_date (YYYY-MM-DD) and ~/.daytrace/output/<date>/ for Layer 3 artifacts."""
+    if normalized_date:
+        report_date = normalized_date
+    elif resolved_since and resolved_until and resolved_since == resolved_until:
+        report_date = resolved_since
+    else:
+        return None, None
+    output_dir = str(Path.home() / ".daytrace" / "output" / report_date)
+    return report_date, output_dir
+
+
 def _resolve_expected_sources(
     *,
     sources_file: str | None,
@@ -263,10 +280,18 @@ def build_projection_payload(
 
     source_results = [_source_run_as_result(source_run) for source_run in source_runs]
 
+    report_date, output_dir = artifact_output_paths(
+        normalized_date=normalized_date,
+        resolved_since=resolved_since,
+        resolved_until=resolved_until,
+    )
+
     payload: dict[str, Any] = {
         "status": "success",
         "generated_at": isoformat(datetime.now().astimezone()),
         "workspace": str(resolved_workspace),
+        "report_date": report_date,
+        "output_dir": output_dir,
         "filters": {
             "since": since,
             "until": until,

@@ -5,7 +5,7 @@ import re
 import shlex
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,21 @@ LOW_SIGNAL_CATEGORIES = {"browser", "file_activity"}
 STRONG_SIGNAL_CATEGORIES = {"git", "ai_history"}
 
 
+def report_day_for_local_time(now: datetime) -> date:
+    """Calendar day used for daily-report output dirs and --date today/yesterday.
+
+    Before 06:00 wall clock in ``now``'s timezone, counts as the previous calendar day
+    (late-night session). When ``resolve_date_filters`` is called without ``now``, uses
+    ``datetime.now().astimezone()`` so the machine's local offset applies.
+    """
+    if now.tzinfo is None:
+        now = datetime.now().astimezone()
+    cal_date = now.date()
+    if now.hour < 6:
+        return cal_date - timedelta(days=1)
+    return cal_date
+
+
 def resolve_date_filters(
     date_arg: str | None,
     since: str | None,
@@ -45,11 +60,12 @@ def resolve_date_filters(
         return since, until
 
     lowered = date_arg.strip().lower()
-    today = (now or datetime.now().astimezone()).date()
+    anchor = now or datetime.now().astimezone()
+    report_day = report_day_for_local_time(anchor)
     if lowered == "today":
-        target = today
+        target = report_day
     elif lowered == "yesterday":
-        target = today - timedelta(days=1)
+        target = report_day - timedelta(days=1)
     else:
         target = parse_datetime(date_arg, bound="start").date()
     iso_day = target.isoformat()

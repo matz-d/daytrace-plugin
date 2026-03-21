@@ -55,10 +55,18 @@ user-invocable: true
 - `topic` は narrative policy で自動選定する
 - workspace は未指定のまま date-first で進める
 
-### 追加 ask の禁止
+### 曖昧性解消 Ask（`docs/output-polish.md` §10）
 
-- `Escalation Conditions` の例外を除き、入口でも途中でも質問しない
-- source 欠損や low confidence が見えても追加 ask しない
+- 基本は ask なしで完走する
+- **例外**: 公開範囲・主軸の特定・内輪情報の伏せ方など、曖昧なままだと**品質または正確性が明らかに落ちる**場合に限り、**この skill について最大 2 ターン**まで確認してよい
+- 抽象的な文体（技術寄り/振り返り寄り等）だけを選ばせる Ask は禁止
+- 無回答時はフォールバックで続行する
+- `Escalation Conditions` の機密確認は従来どおり別枠
+
+### 追加 ask の禁止（原則）
+
+- 上記例外と `Escalation Conditions` を除き、入口でも途中でも質問しない
+- source 欠損や low confidence が見えても追加 ask しない（ただし §10 例外は可）
 - 抽出できなかった情報はデフォルト値で埋める
 
 ## Auto-trigger Contract
@@ -113,6 +121,11 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/post_draft_projection.py --date today --al
 - `groups`: 近接イベントを束ねた活動グループ
 - `timeline`: 詳細な時系列
 - `summary`: 件数と source 利用状況
+- `report_date` / `output_dir`: 単日スコープ時に付く（`docs/output-polish.md` §7）
+
+## Persisted artifacts（Layer 3）
+
+`output_dir` が非 null のとき、生成した narrative を `post-draft.md` に保存する。チャットには要約・パス・成否のみ返す。
 
 ## Scope Contract
 
@@ -238,6 +251,23 @@ ask は使わず、読者と主題から以下を自動で決める。
 - 今日の中心（何を進めたかの narrative。詰まり・判断があれば自然に含める）
 - 気づき（evidence から読み取れた学びや次の手がかり。evidence が弱ければ省略・短縮可）
 
+### 見出し構造（`docs/output-polish.md` §9-3）
+
+標準:
+
+```markdown
+# タイトル案（8–20 字）
+## 背景
+## 今日の中心
+## 気づき（根拠が弱い場合は省略可）
+```
+
+非技術者向け・調査中心の別構成は `Reader Policy` のテンプレートに従う。
+
+### 禁止語・プロダクトコピー
+
+次は使わない: **寄り道**、**今日の重心**（置換: 「別の作業をした時間」「今日の中心作業」など、行動レベルの表現）。
+
 ### 共通ルール
 
 - 文体: ですます調を基本とする。「〜した」「〜だった」ではなく「〜しました」「〜でした」で書く
@@ -301,9 +331,9 @@ ask は使わず、読者と主題から以下を自動で決める。
 成功した `sources[]` の `scope` を見て、注記の要否を決める。
 
 - `all-day` と `workspace` の両方が含まれる場合
-  - 冒頭に短い 1 行で scope を伝える（narrative の第一印象を弱めない）
-  - 例: `この下書きは、1日のログと workspace ローカルの変更ログをもとに再構成しています。`
-  - 詳細な source 別 scope 説明は narrative 末尾のフッターに置く
+  - artifact 本文への mixed-scope 注記は **任意**。`daytrace-session` のセッション完了チャットで §5-5 が必須
+  - artifact に入れる場合は冒頭 1 行の例: `この下書きは、1日のログと workspace ローカルの変更ログをもとに再構成しています。`
+  - 詳細な source 別 scope 説明は narrative 末尾のフッターに置いてもよい
 - `all-day` のみ、または `workspace` のみの場合
   - mixed-scope 注記は必須ではない
 - 注記は coverage の誤認を防ぐための事実説明に留める
@@ -325,7 +355,7 @@ ask は使わず、読者と主題から以下を自動で決める。
     - `注記: ファイル変更からは確認できるが、最終的な意図は断定できない`
     - `注記: ブラウザログのみからの補助推定です`
   - 別セクションへ分離しない
-  - 追加 ask を発生させない
+  - low 根拠だけを理由にした追加 ask はしない（§10 の品質 Ask は別）
 
 ### 低信頼度データの使用ポリシー
 

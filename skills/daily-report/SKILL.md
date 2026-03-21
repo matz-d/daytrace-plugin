@@ -116,6 +116,16 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/daily_report_projection.py --date today --
 - `timeline`: 時系列イベント
 - `groups`: 近接イベントを束ねた活動グループ
 - `summary`: 件数と source 利用状況
+- `report_date` / `output_dir`: 単日スコープ時に付く。Layer 3 artifact の保存先（`docs/output-polish.md` §7）
+
+## Persisted artifacts（Layer 3）
+
+`output_dir` が非 null のとき、生成した日報 Markdown をファイルに書き出す（チャットに全文を載せ切らない）。
+
+- `report-private.md` — 自分用日報
+- `report-share.md` — 共有用を生成した場合のみ（出さない場合はチャットで「共有用は未生成」と明示）
+- 親ディレクトリが無ければ作成してから保存する
+- チャットには **要約・絶対パス・ファイル単位の成功/失敗** だけを返す
 
 ## Scope Contract
 
@@ -150,6 +160,13 @@ workspace は date-first の主軸ではなく補助フィルタだが、mixed-s
 
 出力は日本語 Markdown。
 mode によって構成と文体を変えるが、どちらも date-first の日報として出す。
+
+### Canonical timeline（`docs/output-polish.md` §5-1）
+
+- 活動の並べ方は **時系列（古い→新しい）** を基本にする。時間帯ラベル（午前/午後等）は必須としない
+- 共有用でもカテゴリ内の順序がログ時刻と明らかに矛盾しないようにする
+- 同一出来事の重複記述を避け、ユーザー視点の 1 本の時間軸でまとめる
+- 推測を含む場合は推測であることを明示する
 
 ### 共通ルール
 
@@ -257,9 +274,9 @@ mode によって構成と文体を変えるが、どちらも date-first の日
 成功した `sources[]` の `scope` を見て、注記の要否を決める。
 
 - `all-day` と `workspace` の両方が含まれる場合
-  - 冒頭に短い 1 行で scope を伝える（日報の第一印象を弱めない）
-  - 例: `この日報は、1日のログと workspace ローカルの変更ログをもとに再構成しています。`
-  - 詳細な source 別 scope 説明は日報末尾のフッターに置く
+  - artifact 本文への mixed-scope 注記は **任意**（読みやすさ優先）。`daytrace-session` のセッション完了チャットでは §5-5 として **必須**（orchestration 側で出す）
+  - artifact に入れる場合は冒頭 1 行で scope を伝える例: `この日報は、1日のログと workspace ローカルの変更ログをもとに再構成しています。`
+  - 詳細な source 別 scope 説明は日報末尾のフッターに置いてもよい
   - フッター例: `> 再構成元: git-history, claude-history, codex-history / workspace ローカルの変更ログは {workspace名} に限定されています`
 - `all-day` のみ、または `workspace` のみの場合
   - mixed-scope 注記は必須ではない

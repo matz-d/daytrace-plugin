@@ -48,6 +48,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_prepare.py --input-source auto
 - デフォルト観測窓は 7 日
 - `--all-sessions` は workspace 制限を外すだけで、7 日窓は維持する
 - `--input-source auto` は store-backed `observations` を優先し、該当データが無い時だけ raw history へフォールバックする
+- 日報と同じ「報告日」に窓を合わせる場合は `--reference-date YYYY-MM-DD`（`daily_report_projection` の `report_date` と一致。06:00 境界は `aggregate_core.resolve_date_filters` と揃う）
 - `--store-path` を付けると candidate を `patterns` として store へ更新し、旧 raw path との比較が必要な期間は `--compare-legacy` を併用できる
 - `workspace` モード（`--all-sessions` を付けない通常実行。`--workspace` 未指定時は `cwd` を使う）だけ、packet / candidate が少なすぎる場合に 30 日へ自動拡張する
 - full-history 相当の観測が必要な場合は、B0 観測（改善優先度を決めるための実データ観測）用に `--all-sessions --days 3650 --dump-intents` のように明示する
@@ -249,6 +250,19 @@ B0 観測の方法と優先順位ルールは `references/b0-observation.md` を
 
 既定の `markdown` は **最終 `suggested_kind`・短い分類サマリ（LLM/guardrail 時）・根拠・次の一手**を中心にし、`classification_trace` の段階展開は省略する。詳細は `--markdown-classification-detail` または `ready[]` の JSON を参照。
 
+### Chat-side compact 表（`daytrace-session` / `docs/output-polish.md` §6）
+
+統合セッションでは、チャットの第一画面を次の表形式にする（`ready[]` を 1 行ずつ埋める）。**全文の `markdown` は `output_dir` の `proposal.md` に保存**し、チャットには表＋一行要約＋パスを返す。
+
+```text
+| # | 候補 | 種類 | 確度 | 効果 | アクション |
+|---|------|------|------|------|-----------|
+| 1 | {label} | CLAUDE.md / skill / hook / agent | {高い/中程度/まだ弱い 等} | {次回どう楽になるか一言} | {すぐ追加可 / skill-creator 等} |
+```
+
+- **適用スコープ**（`workspace-local` / `global-personal`）は `docs/output-polish.md` §9-4 の任意メタ。表に列として必須にしない。本文や注記で短く付けてもよい
+- `/skill-miner` 単体実行時も、チャット切れ防止のため同じく `proposal.md` へ保存することを推奨
+
 proposal の冒頭には観測範囲を明示し、3 区分で返す。
 内部 triage key（`ready` / `needs_research` / `rejected`）はそのままで、ユーザー向け見出しだけを変更する。
 
@@ -257,7 +271,7 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 - proposal markdown には `intent_trace` を直接展開しない（raw intent の羅列はノイズになるため）
 - 根拠表示は `evidence_items[].summary` で完結させる
 - `intent_trace` は `decision_log_stub` にのみ含める（デバッグ・監査用詳細は Decision Log Contract を参照）
-- LLM が分類 override する場合、`intent_trace` を根拠として判断ログ内で引用してよい
+- LLM が分類 override する場合、`intent_trace` を根拠として内部メモやユーザー向け短文に引用してよい（`[DayTrace]` は使わない）
 - `needs_research` の `research_brief.questions` に intent 不一致を含めてよい
 - contamination signal（`origin_hint`, `user_signal_strength`, `contamination_signals`）は markdown に短い注記として出してよい
 - `origin_hint=""` は legacy packet 由来の「未観測」を意味し、単独では汚染疑いとして扱わない
@@ -351,10 +365,10 @@ proposal の冒頭には観測範囲を明示し、3 区分で返す。
 - `intent_trace`: 監査用。proposal markdown には展開しない
 - `decision_log_stub` は次回判定用の機械的な橋渡しに限定し、分類 override の長い説明は保持しない
 分類 override の記録ルール:
-- override 理由は `decision_log_stub` ではなく、人間向けの判断ログまたは候補説明に短く残す
+- override 理由は `decision_log_stub` ではなく、人間向けの候補説明または `### パターン提案` の一行要約に短く残す
 - 推奨フォーマット: `分類 override: heuristic=<from> → final=<to> / reason: <short reason>`
-- `daytrace-session` 配下では必要に応じて `[DayTrace] パターン検出: ...` の 1 行ログに圧縮してよい
-- standalone の `skill-miner` では候補ごとの説明文で同じ内容を残してよい
+- `daytrace-session` 配下では **compact 表 + `proposal.md`** を正とし、`[DayTrace]` プレフィックスは使わない
+- standalone の `skill-miner` でも上記を推奨（長文のみチャットは切れやすい）
 次回判定への反映ルール（詳細は `references/carry-forward-state-machine.md` を参照）:
 - `user_decision="adopt"` かつ `CLAUDE.md` → CLAUDE.md に追記済み。次回は `## DayTrace Suggested Rules` と照合して重複 skip
 - `user_decision="adopt"` かつ `skill/hook/agent` → 生成成功（`done`）を確認できた場合のみ `carry_forward=false` で次回 suppress。成功未確認・中断時は `defer` 扱いで suppress しない

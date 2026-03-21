@@ -4,7 +4,7 @@ description: >
   skill-miner が提案した候補を実際の成果物に変換する。
   CLAUDE.md ルール追記、skill scaffold、hook 設定生成、agent 定義生成を行う。
   「提案を適用して」「CLAUDE.md に追加して」「skill にして」「hook 化して」「エージェントにして」と言われた時に使う。
-  daytrace-session Phase 3 のアクション実行も担う。
+  daytrace-session Phase 4（Pattern Mining）のアクション実行も担う。
 user-invocable: true
 ---
 
