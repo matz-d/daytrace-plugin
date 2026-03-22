@@ -1,0 +1,18 @@
+{
+  "name": "daytrace-plugin",
+  "owner": {
+    "name": "matz-d"
+  },
+  "metadata": {
+    "description": "DayTrace: ローカル証跡から日報・投稿下書き・スキル提案を生成する自己改善エージェント"
+  },
+  "plugins": [
+    {
+      "name": "daytrace",
+      "description": "ローカル証跡から観測→抽出→適用を自律的に回す自己改善エージェント。Date-first/Scope-first の直交射影で日報・投稿下書き・スキル提案を生成し、Carry-Forward State Machine でユーザー判断を次回の学習に変える。外部通信ゼロ・Python stdlib のみ。",
+      "category": "productivity",
+      "source": "./",
+      "homepage": "https://github.com/matz-d/daytrace-plugin"
+    }
+  ]
+}
