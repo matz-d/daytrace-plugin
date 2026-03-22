@@ -299,6 +299,13 @@ def finalize_skill_handoff_presentation(handoff: dict[str, Any], context_file: s
     cd_hint = handoff.get("target_workspace_hint")
     if cross and isinstance(cd_hint, str) and cd_hint.startswith("/"):
         lines.extend(["", f"例: cd {cd_hint}"])
+    copy_prompt = (
+        f"/skill-creator {context_file} 以下の内容をもとにスキルを作成してください。"
+        " handoff は正本ではないため、先に適用先 repo の生ファイルと実データを確認し、"
+        "既存 artifact がある場合は保守・更新 skill として再設計してください。"
+        " 曖昧な部分は ask_user で確認してください。"
+    )
+    lines.extend(["", "この文言をコピーして使ってください:", copy_prompt])
     lines.append("```")
     handoff["presentation_block"] = "\n".join(lines)
 
