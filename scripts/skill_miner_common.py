@@ -566,7 +566,10 @@ def pattern_in_text(text: str, pattern: str) -> bool:
 
 
 def sanitize_url_domain(raw_url: str) -> str:
-    parsed = urlsplit(raw_url)
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return raw_url
     if not parsed.scheme or not parsed.netloc:
         return raw_url
     return f"{parsed.scheme}://{parsed.netloc}"

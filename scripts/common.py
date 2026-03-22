@@ -98,7 +98,10 @@ def within_range(value: datetime | str | int | float | None, start: datetime | N
 
 
 def sanitize_url(raw_url: str) -> str:
-    parsed = urlsplit(raw_url)
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return raw_url
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
