@@ -45,9 +45,11 @@ Git: 3 commits  Claude: 12 sessions  Chrome: 47 tabs
 各提案には **根拠（evidence）と確度（チャット上は日本語の確度行）** が付きます。見送った提案は decision log に残り、証跡が蓄積されれば次回あらためて再浮上します。
 
 ## インストール
-
 ```bash
-claude plugin add github:matz-d/daytrace-plugin
+claude plugin marketplace add matz-d/daytrace-plugin
+```
+```bash
+claude plugin install daytrace
 ```
 
 設定不要。外部へのデータ送信なし。
