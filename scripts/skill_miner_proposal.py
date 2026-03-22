@@ -258,6 +258,8 @@ def finalize_skill_handoff_presentation(handoff: dict[str, Any], context_file: s
     target = str(handoff.get("target_workspace_hint") or "").strip() or "（ログの workspace を確認）"
     current = handoff.get("current_workspace")
     current_label = str(current).strip() if current else "（未設定 / 全日程観測）"
+    mode = str(handoff.get("suggested_operation_mode") or "").strip()
+    mode_reason = str(handoff.get("operation_mode_reason") or "").strip()
     lines = ["```text"]
     if cross:
         lines.append("この候補は別リポジトリ向けです。現在の CWD ではなく、対象リポジトリを開いてから適用してください。")
@@ -269,6 +271,8 @@ def finalize_skill_handoff_presentation(handoff: dict[str, Any], context_file: s
             f"target repo: {target}",
             f"current workspace (観測時 --workspace): {current_label}",
             f"handoff file: {context_file}",
+            *( [f"suggested next operation: {mode}"] if mode else [] ),
+            *( [f"reason: {mode_reason}"] if mode_reason else [] ),
             "",
             "実行すること:",
         ]
@@ -277,15 +281,19 @@ def finalize_skill_handoff_presentation(handoff: dict[str, Any], context_file: s
         lines.extend(
             [
                 "1. 対象リポジトリを開く（上記 target repo）",
-                "2. そのルートで /skill-creator を実行する",
-                "3. この JSON の context をプロンプトに含める",
+                "2. handoff を正本扱いせず、repo の生ファイル・実データを先に確認する",
+                "3. 既存 artifact がある場合は保守・更新 skill として再設計してよい",
+                "4. そのルートで /skill-creator を実行する",
+                "5. この JSON の context は scaffold としてプロンプトに含める",
             ]
         )
     else:
         lines.extend(
             [
                 "1. 適用先リポジトリを開く",
-                "2. /skill-creator を実行し、この handoff の scaffold を渡す",
+                "2. handoff を正本扱いせず、repo の生ファイル・実データを先に確認する",
+                "3. 既存 artifact がある場合は保守・更新 skill として再設計してよい",
+                "4. /skill-creator を実行し、この handoff の scaffold を渡す",
             ]
         )
     cd_hint = handoff.get("target_workspace_hint")

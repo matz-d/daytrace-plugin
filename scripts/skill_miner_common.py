@@ -7,7 +7,7 @@ import shlex
 from collections import Counter, defaultdict
 from difflib import unified_diff
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import urlsplit
 
 from common import ensure_datetime, extract_text, is_within_path, summarize_text
@@ -3167,7 +3167,43 @@ def _skill_slug(text: str) -> str:
     return slug[:48] or "daytrace-skill-draft"
 
 
-def build_skill_creator_handoff(context: dict[str, Any]) -> dict[str, Any]:
+class SkillScaffoldContext(TypedDict, total=False):
+    """Structured scaffold from build_skill_scaffold_context; also valid handoff input."""
+
+    skill_name: str
+    goal: str
+    task_shapes: list[str]
+    artifact_hints: list[str]
+    rule_hints: list[str]
+    intent_trace: list[str]
+    constraints: list[str]
+    acceptance_criteria: list[str]
+    execution_hints: list[str]
+    representative_examples: list[str]
+    evidence_summaries: list[str]
+    observed_history_summary: list[str]
+    suggested_operation_mode: str
+    operation_mode_reason: str
+    next_operation_guidance: str
+    observation_count: int
+    source_diversity: int
+
+
+def _coerce_context_int(value: Any, *, default: int = 0) -> int:
+    """Parse observation_count / source_diversity from scaffold or loose JSON; never raises."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def build_skill_creator_handoff(context: SkillScaffoldContext) -> dict[str, Any]:
     skill_name = str(context.get("skill_name") or "daytrace-skill-draft").strip() or "daytrace-skill-draft"
     goal = str(context.get("goal") or "this repeated workflow").strip() or "this repeated workflow"
     artifact_hints = ", ".join(str(item) for item in context.get("artifact_hints", []) if str(item).strip()) or "n/a"
@@ -3176,21 +3212,74 @@ def build_skill_creator_handoff(context: dict[str, Any]) -> dict[str, Any]:
     intent_trace = [str(item) for item in context.get("intent_trace", []) if str(item).strip()]
     constraints = [str(item) for item in context.get("constraints", []) if str(item).strip()]
     acceptance_criteria = [str(item) for item in context.get("acceptance_criteria", []) if str(item).strip()]
+    execution_hints = [str(item) for item in context.get("execution_hints", []) if str(item).strip()]
+    evidence_summaries = [str(item) for item in context.get("evidence_summaries", []) if str(item).strip()]
+    observed_history_summary = [str(item) for item in context.get("observed_history_summary", []) if str(item).strip()]
+    suggested_operation_mode = str(context.get("suggested_operation_mode") or "").strip() or "maintenance_update"
+    operation_mode_reason = str(context.get("operation_mode_reason") or "").strip() or "履歴と repo 状態から次オペレーションを再判定する"
+    next_operation_guidance = str(context.get("next_operation_guidance") or "").strip()
+    observation_count = _coerce_context_int(context.get("observation_count"), default=0)
+    source_diversity = _coerce_context_int(context.get("source_diversity"), default=0)
+
+    raw_repo_guardrails = [
+        "handoff を正本扱いせず、必ず適用先リポジトリの生ファイルと実データを確認してから設計する",
+        "既存 artifact がある場合は、新規作成 skill ではなく保守・更新 skill への再設計を許容する",
+    ]
+    for item in raw_repo_guardrails:
+        if item not in constraints:
+            constraints.insert(0, item)
+
+    completion_guardrails = [
+        "SKILL.md だけで終えず、最低 1 つは references / scripts / assets のいずれかを含める",
+        "不足判定・更新判定・完成条件が明文化されている",
+    ]
+    for item in completion_guardrails:
+        if item not in acceptance_criteria:
+            acceptance_criteria.append(item)
+
+    weak_evidence = source_diversity <= 1 or observation_count <= 4 or (not representative_examples and not evidence_summaries)
+    if weak_evidence:
+        weak_note = "証拠が弱いため、skill 名・ラベル・ファイル名候補を鵜呑みにせず repo 文脈で再命名・再解釈する"
+        if weak_note not in constraints:
+            constraints.insert(0, weak_note)
+        ask_note = "判断に必要な事実が repo だけで確定しない場合は、実装前に 2〜3 問だけ確認する"
+        if ask_note not in acceptance_criteria:
+            acceptance_criteria.append(ask_note)
+
     example_lines = "\n".join(f"- {example}" for example in representative_examples[:3]) or "- n/a"
     intent_lines = "\n".join(f"- {item}" for item in intent_trace[:3]) or "- n/a"
     constraint_lines = "\n".join(f"- {item}" for item in constraints[:3]) or "- n/a"
     acceptance_lines = "\n".join(f"- {item}" for item in acceptance_criteria[:3]) or "- n/a"
+    execution_lines = "\n".join(f"- {item}" for item in execution_hints[:4]) or "- n/a"
+    evidence_lines = "\n".join(f"- {item}" for item in evidence_summaries[:3]) or "- n/a"
+    history_lines = "\n".join(f"- {item}" for item in observed_history_summary[:4]) or "- n/a"
+    evidence_quality = f"observations={observation_count}, source_diversity={source_diversity}"
 
     prompt = "\n".join(
         [
             f"Create or refine a reusable skill named `{skill_name}`.",
             f"Goal: {goal}",
+            "Treat the handoff as scaffold context, not a final draft. You may rename the skill if the suggested name is noisy or too specific.",
+            "Infer the reusable operation from both repository state and observed history, not from the handoff label alone.",
+            "Choose the correct operation mode before writing the skill: creation, maintenance/update, backfill/gap-fill, verification, or another mode justified by the evidence.",
+            "Design the skill around the repeated judgment and next operation, not around ad-hoc shell commands or a one-off checklist.",
+            f"Suggested operation mode: {suggested_operation_mode}",
+            f"Operation mode reason: {operation_mode_reason}",
             f"Artifact hints: {artifact_hints}",
             f"Rule hints: {rule_hints}",
+            f"Evidence quality: {evidence_quality}",
             "Representative examples:",
             example_lines,
+            "Evidence summaries:",
+            evidence_lines,
+            "Observed history summary:",
+            history_lines,
             "Intent trace:",
             intent_lines,
+            "Execution hints:",
+            execution_lines,
+            "Next operation guidance:",
+            next_operation_guidance or "Validate the next repeated operation against raw repo state and history before implementing the skill.",
             "Constraints:",
             constraint_lines,
             "Acceptance criteria:",
@@ -3206,6 +3295,10 @@ def build_skill_creator_handoff(context: dict[str, Any]) -> dict[str, Any]:
         "mode": "manual-handoff",
         "target_skill_name": skill_name,
         "suggested_invocation": f"/skill-creator {skill_name} をスキルにしてください",
+        "suggested_operation_mode": suggested_operation_mode,
+        "operation_mode_reason": operation_mode_reason,
+        "observed_history_summary": observed_history_summary[:4],
+        "next_operation_guidance": next_operation_guidance or "Validate the next repeated operation against raw repo state and history before implementing the skill.",
         "prompt": prompt,
         "instructions": [
             "Open /skill-creator manually.",
@@ -3223,6 +3316,10 @@ def build_skill_creator_handoff(context: dict[str, Any]) -> dict[str, Any]:
             "acceptance_criteria",
             "representative_examples",
             "evidence_summaries",
+            "observed_history_summary",
+            "suggested_operation_mode",
+            "operation_mode_reason",
+            "next_operation_guidance",
         ],
     }
 
@@ -3325,8 +3422,10 @@ def build_cross_repo_handoff_metadata(
             [
                 "別リポジトリ向けの可能性が高いです。現在の CWD だけを信頼しないでください。",
                 f"1. 対象リポジトリを開く（推奨: {target_hint or 'ログの workspace を確認'}）",
-                "2. そのリポジトリをプロジェクトルートにした状態で /skill-creator を実行する",
-                "3. この handoff の context_file（JSON bundle）の scaffold をプロンプトに含める",
+                "2. handoff を正本扱いせず、repo の生ファイル・実データを先に確認する",
+                "3. 既存 artifact がある場合は保守・更新 skill として再設計してよい",
+                "4. そのリポジトリをプロジェクトルートにした状態で /skill-creator を実行する",
+                "5. この handoff の context_file（JSON bundle）は scaffold としてプロンプトに含める",
             ]
         )
     else:
@@ -3334,7 +3433,9 @@ def build_cross_repo_handoff_metadata(
         execution_instruction = "\n".join(
             [
                 f"1. 適用先のリポジトリを開く（目安: {base}）",
-                "2. /skill-creator を実行し、この handoff の scaffold 情報を渡す",
+                "2. handoff を正本扱いせず、repo の生ファイル・実データを先に確認する",
+                "3. 既存 artifact がある場合は保守・更新 skill として再設計してよい",
+                "4. /skill-creator を実行し、この handoff の scaffold 情報を渡す",
             ]
         )
 
@@ -4053,7 +4154,7 @@ def build_proposal_sections(
         metadata=prepare_payload,
         markdown_classification_detail=markdown_classification_detail,
     )
-    selection_prompt = "候補番号を入力すると /skill-creator による登録フローが始まります。選ばなかった候補は次回以降も引き続き提案されます。複数登録したい場合は 1 つずつ選択してください。" if ready else None
+    selection_prompt = "候補番号を入力すると /skill-creator による登録フローが始まります。選択後は handoff を正本扱いせず、適用先 repo の生ファイル確認から始めてください。選ばなかった候補は次回以降も引き続き提案されます。複数登録したい場合は 1 つずつ選択してください。" if ready else None
     decision_log_stub = [build_candidate_decision_stub(candidate) for candidate in ready + needs_research + rejected]
     learning_feedback = build_learning_feedback(
         ready,
@@ -4322,7 +4423,7 @@ def build_proposal_markdown(
 
     if ready:
         lines.append("")
-        lines.append("候補番号を入力すると /skill-creator による登録フローが始まります。選ばなかった候補は次回以降も引き続き提案されます。複数登録したい場合は 1 つずつ選択してください。")
+        lines.append("候補番号を入力すると /skill-creator による登録フローが始まります。選択後は handoff を正本扱いせず、適用先 repo の生ファイル確認から始めてください。選ばなかった候補は次回以降も引き続き提案されます。複数登録したい場合は 1 つずつ選択してください。")
     return "\n".join(lines)
 
 
@@ -4339,11 +4440,14 @@ def build_skill_scaffold_summary_lines(candidate: dict[str, Any]) -> list[str]:
     summary_parts: list[str] = []
     artifact_hints = [str(item).strip() for item in context.get("artifact_hints", []) if str(item).strip()]
     rule_hints = [str(item).strip() for item in context.get("rule_hints", []) if str(item).strip()]
+    suggested_operation_mode = str(context.get("suggested_operation_mode") or "").strip()
     observation_count = context.get("observation_count")
     if artifact_hints:
         summary_parts.append(f"成果物={', '.join(artifact_hints[:2])}")
     if rule_hints:
         summary_parts.append(f"ルール={', '.join(rule_hints[:2])}")
+    if suggested_operation_mode:
+        summary_parts.append(f"推定モード={suggested_operation_mode}")
     if isinstance(observation_count, int) and observation_count > 0:
         summary_parts.append(f"観測={observation_count}回")
     if summary_parts:
@@ -4356,6 +4460,13 @@ def build_skill_scaffold_summary_lines(candidate: dict[str, Any]) -> list[str]:
     ]
     if representative_examples:
         lines.append(f"   scaffold例: {representative_examples[0]}")
+    observed_history_summary = [
+        summarize_text(str(item).strip(), 100)
+        for item in context.get("observed_history_summary", [])
+        if str(item).strip()
+    ]
+    if observed_history_summary:
+        lines.append(f"   観測履歴: {observed_history_summary[0]}")
     return lines
 
 
@@ -4572,6 +4683,113 @@ def build_evidence_chain_lines(candidate: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _infer_skill_operation_mode(
+    label: str,
+    *,
+    task_shapes: list[str],
+    artifact_hints: list[str],
+    rule_hints: list[str],
+    representative_examples: list[str],
+    intent_trace: list[str],
+    evidence_summaries: list[str],
+) -> tuple[str, str]:
+    corpus = " ".join(
+        [
+            label,
+            *task_shapes,
+            *artifact_hints,
+            *rule_hints,
+            *representative_examples,
+            *intent_trace,
+            *evidence_summaries,
+        ]
+    )
+    normalized = normalize_match_text(corpus)
+
+    def _needle_hit(needle: str) -> bool:
+        return pattern_in_text(normalized, needle)
+
+    creation_hits = sum(
+        1
+        for needle in ("new", "create", "generate", "新規", "作成", "生成", "初期化", "scaffold")
+        if _needle_hit(needle)
+    )
+    maintenance_hits = sum(
+        1
+        for needle in ("maintain", "maintenance", "update", "refresh", "edit", "patch", "保守", "更新", "修正", "差分", "既存")
+        if _needle_hit(needle)
+    )
+    backfill_hits = sum(
+        1
+        for needle in ("missing", "backfill", "gap", "fill", "coverage", "欠損", "不足", "埋め", "補完", "揃った")
+        if _needle_hit(needle)
+    )
+    verify_hits = sum(
+        1
+        for needle in ("verify", "verification", "validate", "check", "audit", "確認", "検証", "点検", "監査", "レビュー")
+        if _needle_hit(needle)
+    )
+    aggregate_hits = sum(
+        1
+        for needle in ("aggregate", "aggregation", "collect", "summary", "summarize", "report", "集約", "収集", "集計", "要約", "日報", "週次")
+        if _needle_hit(needle)
+    )
+    investigate_hits = sum(
+        1
+        for needle in ("explore", "investigate", "research", "analyze", "analysis", "調査", "探索", "分析", "掘る", "確認する")
+        if _needle_hit(needle)
+    )
+    flow_hits = sum(
+        1
+        for needle in ("workflow", "flow", "then", "after", "最後に", "その後", "終わったら", "揃ったら", "完了したら")
+        if _needle_hit(needle)
+    )
+
+    if (backfill_hits > 0 and aggregate_hits > 0) or flow_hits >= 2 or (
+        sum(1 for count in (maintenance_hits, backfill_hits, verify_hits, aggregate_hits) if count > 0) >= 3
+    ):
+        return (
+            "workflow_orchestration",
+            "観測履歴に複数段階の繰り返し作業が見えるため、単発作成ではなくワークフロー全体の肩代わりが主目的",
+        )
+    if backfill_hits > 0:
+        return ("backfill_gap_fill", "欠損や未充足を埋める反復オペレーションが主と推定")
+    if maintenance_hits > creation_hits and maintenance_hits > 0:
+        return ("maintenance_update", "既存 artifact の更新・保守を示す信号が新規作成より強い")
+    if aggregate_hits > 0 and verify_hits > 0:
+        return ("verification", "集約や次処理の前に readiness を確認する反復オペレーションと推定")
+    if aggregate_hits > 0:
+        return ("aggregation", "複数 artifact の収集・集約が主な反復オペレーションと推定")
+    if investigate_hits > 0 and maintenance_hits == 0 and backfill_hits == 0:
+        return ("investigation", "まず調査・探索を行う反復オペレーションと推定")
+    if creation_hits > 0:
+        return ("creation", "新規作成や雛形生成を示す信号が最も強い")
+    return ("maintenance_update", "既存資産を確認しながら次オペレーションを決める保守寄りの運用と推定")
+
+
+def _build_observed_history_summary(
+    *,
+    representative_examples: list[str],
+    evidence_summaries: list[str],
+    observation_count: int,
+    source_diversity: int,
+) -> list[str]:
+    lines: list[str] = []
+    if observation_count > 0:
+        lines.append(f"観測件数: {observation_count}")
+    if source_diversity > 0:
+        lines.append(f"観測ソース種別数: {source_diversity}")
+    for example in representative_examples[:2]:
+        sample = summarize_text(str(example).strip(), 120)
+        if sample:
+            lines.append(f"代表例: {sample}")
+    for summary in evidence_summaries[:2]:
+        sample = summarize_text(str(summary).strip(), 120)
+        if sample:
+            lines.append(f"履歴要約: {sample}")
+    return lines
+
+
 def recent_packet_count(timestamps: list[str], latest_timestamp: str | None) -> int:
     if not latest_timestamp:
         return 0
@@ -4587,7 +4805,7 @@ def recent_packet_count(timestamps: list[str], latest_timestamp: str | None) -> 
     return count
 
 
-def build_skill_scaffold_context(candidate: dict[str, Any]) -> dict[str, Any]:
+def build_skill_scaffold_context(candidate: dict[str, Any]) -> SkillScaffoldContext:
     """Build structured context for skill scaffold draft generation.
 
     This provides the input for skill-creator to generate a SKILL.md draft.
@@ -4613,6 +4831,13 @@ def build_skill_scaffold_context(candidate: dict[str, Any]) -> dict[str, Any]:
         execution_hints.append(f"成果物タイプ: {', '.join(artifact_hints)}")
     if rule_hints:
         execution_hints.append(f"適用ルール: {', '.join(rule_hints)}")
+    execution_hints.extend(
+        [
+            "handoff のラベルや候補名を鵜呑みにせず、先に適用先 repo の生ファイルを確認する",
+            "現在の repo 状態だけでなく、観測履歴から繰り返し発生している次オペレーションを推定する",
+            "既存 artifact がある場合は、新規作成ではなく保守・更新 skill として再設計してよい",
+        ]
+    )
 
     evidence_summaries = []
     for item in (evidence_items or [])[:3]:
@@ -4620,6 +4845,29 @@ def build_skill_scaffold_context(candidate: dict[str, Any]) -> dict[str, Any]:
             summary = str(item.get("summary") or "").strip()
             if summary:
                 evidence_summaries.append(summary)
+
+    observation_count = int(support.get("total_packets", 0))
+    source_diversity = int(support.get("claude_packets", 0) > 0) + int(support.get("codex_packets", 0) > 0)
+    suggested_operation_mode, operation_mode_reason = _infer_skill_operation_mode(
+        label,
+        task_shapes=task_shapes,
+        artifact_hints=artifact_hints,
+        rule_hints=rule_hints,
+        representative_examples=representative_examples,
+        intent_trace=intent_trace,
+        evidence_summaries=evidence_summaries,
+    )
+    observed_history_summary = _build_observed_history_summary(
+        representative_examples=representative_examples,
+        evidence_summaries=evidence_summaries,
+        observation_count=observation_count,
+        source_diversity=source_diversity,
+    )
+    next_operation_guidance = (
+        "まず適用先 repo と観測履歴を突き合わせ、"
+        f"`{suggested_operation_mode}` が本当に次の反復オペレーションか検証する。"
+        " その結果に応じて creation / maintenance_update / backfill_gap_fill / verification / aggregation / workflow_orchestration / investigation のいずれかへ再設計する。"
+    )
 
     return {
         "skill_name": _skill_slug(label),
@@ -4633,8 +4881,12 @@ def build_skill_scaffold_context(candidate: dict[str, Any]) -> dict[str, Any]:
         "execution_hints": execution_hints,
         "representative_examples": representative_examples[:3],
         "evidence_summaries": evidence_summaries,
-        "observation_count": int(support.get("total_packets", 0)),
-        "source_diversity": int(support.get("claude_packets", 0) > 0) + int(support.get("codex_packets", 0) > 0),
+        "observed_history_summary": observed_history_summary,
+        "suggested_operation_mode": suggested_operation_mode,
+        "operation_mode_reason": operation_mode_reason,
+        "next_operation_guidance": next_operation_guidance,
+        "observation_count": observation_count,
+        "source_diversity": source_diversity,
     }
 
 

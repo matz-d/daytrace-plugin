@@ -6,7 +6,7 @@
 ## DayTrace 側の責務
 
 1. candidate から `skill_scaffold_context` を構造化する（`build_skill_scaffold_context()` が返す）
-2. context には `skill_name`, `goal`, `task_shapes`, `artifact_hints`, `rule_hints`, `execution_hints`, `representative_examples`, `evidence_summaries`, `observation_count` を含む
+2. context には `skill_name`, `goal`, `task_shapes`, `artifact_hints`, `rule_hints`, `execution_hints`, `representative_examples`, `evidence_summaries`, `observed_history_summary`, `suggested_operation_mode`, `operation_mode_reason`, `next_operation_guidance`, `observation_count` を含む
 3. scaffold context を `skill-creator` への引き継ぎプロンプトとして出力する
 
 ## Output Template
@@ -17,8 +17,14 @@
 この候補は {observation_count}回の反復パターンから抽出されました。
 
 **Goal:** {goal}
+**推定された次オペレーション:** {suggested_operation_mode}
+**理由:** {operation_mode_reason}
 **成果物:** {artifact_hints}
 **適用ルール:** {rule_hints}
+
+**観測履歴要約:**
+- {history_1}
+- {history_2}
 
 **代表的な使用例:**
 - {example_1}
@@ -38,6 +44,8 @@
 - cross-repo の判定とフィールド一覧は `skills/skill-miner/references/cross-repo-handoff.md`
 - persisted handoff path は `skill_creator_handoff.context_file` として返り、監査や手渡し再利用に使える
 - ユーザーが `/skill-creator` を呼ぶ際に context を参照して渡す
+- handoff bundle は scaffold であり binding ではない。`/skill-creator` 実行前に、適用先 repo の生ファイルと実データを必ず確認する
+- 既存 artifact がある場合は、新規作成 skill ではなく保守・更新 skill として再設計してよい
 - proposal markdown の末尾に以下のガイドを表示する:
 
 ```markdown
