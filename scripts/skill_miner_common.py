@@ -4062,6 +4062,238 @@ def _ready_state_guard_reasons(candidate: dict[str, Any]) -> list[str]:
 
 _CONFIDENCE_SORT_PRIORITY = {"strong": 0, "medium": 1, "weak": 2}
 
+CLASSIFICATION_TARGET_REASON_SUMMARIES = {
+    "research_promotion": "追加調査で ready に昇格したため、最終 kind を明示したい",
+    "split_child": "分割後の子候補で境界が変わりやすい",
+    "weak_confidence": "heuristic の確信が十分に強くない",
+    "skill_agent_boundary": "skill / agent 境界が揺れやすい",
+    "skill_claude_boundary": "skill / CLAUDE.md 境界が揺れやすい",
+}
+CLASSIFICATION_PROMPT_KEYS = (
+    "candidate_id",
+    "label",
+    "triage_status",
+    "proposal_ready",
+    "suggested_kind",
+    "confidence",
+    "confidence_reason",
+    "evidence_items",
+    "intent_trace",
+    "common_task_shapes",
+    "artifact_hints",
+    "rule_hints",
+    "representative_examples",
+    "constraints",
+    "acceptance_criteria",
+    "support",
+    "research_brief",
+)
+
+
+def _apply_ready_state_guard(candidate: dict[str, Any]) -> dict[str, Any]:
+    guarded = dict(candidate)
+    triage_status = str(guarded.get("triage_status") or "")
+    if triage_status == "ready" and guarded.get("proposal_ready"):
+        guard_reasons = _ready_state_guard_reasons(guarded)
+        if guard_reasons:
+            guarded["triage_status"] = "needs_research"
+            guarded["proposal_ready"] = False
+            guarded["confidence_reason"] = (
+                f"{guarded.get('confidence_reason', '')} "
+                f"(ready guard: {'; '.join(guard_reasons)} のため有望候補に留めました)"
+            ).strip()
+    return guarded
+
+
+def build_proposal_input_candidates(
+    prepare_payload: dict[str, Any],
+    judgments_by_candidate_id: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    judgments_by_candidate_id = judgments_by_candidate_id or {}
+    prepared: list[dict[str, Any]] = []
+
+    for raw_candidate in prepare_payload.get("candidates", []):
+        if not isinstance(raw_candidate, dict):
+            continue
+        candidate_id = str(raw_candidate.get("candidate_id") or "")
+        candidate = merge_judgment_into_candidate(raw_candidate, judgments_by_candidate_id.get(candidate_id))
+        split_children = _materialize_split_candidates(candidate)
+        if split_children:
+            for child in split_children:
+                prepared.append(_apply_ready_state_guard(child))
+            continue
+        prepared.append(_apply_ready_state_guard(candidate))
+
+    return prepared
+
+
+def _classification_target_priority(reason_codes: list[str]) -> str:
+    if any(code in {"research_promotion", "split_child"} for code in reason_codes):
+        return "high"
+    if len(reason_codes) >= 2 or any(code in {"skill_agent_boundary", "skill_claude_boundary"} for code in reason_codes):
+        return "medium"
+    return "low"
+
+
+def build_classification_prompt_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    inferred = infer_suggested_kind_details(candidate)
+    prompt_candidate: dict[str, Any] = {
+        "candidate_id": str(candidate.get("candidate_id") or "").strip(),
+        "label": str(candidate.get("label") or "").strip(),
+        "triage_status": str(candidate.get("triage_status") or "").strip(),
+        "proposal_ready": bool(candidate.get("proposal_ready")),
+        "suggested_kind": _valid_suggested_kind(candidate.get("suggested_kind")) or inferred["kind"],
+        "confidence": str(candidate.get("confidence") or "").strip(),
+        "confidence_reason": str(candidate.get("confidence_reason") or "").strip(),
+        "evidence_items": [],
+        "intent_trace": [str(item).strip() for item in candidate.get("intent_trace", []) if str(item).strip()],
+        "common_task_shapes": _candidate_task_shapes(candidate),
+        "artifact_hints": _candidate_artifact_hints(candidate),
+        "rule_hints": _candidate_rule_hints(candidate),
+        "representative_examples": [str(item).strip() for item in candidate.get("representative_examples", []) if str(item).strip()],
+        "constraints": [str(item).strip() for item in candidate.get("constraints", []) if str(item).strip()],
+        "acceptance_criteria": [str(item).strip() for item in candidate.get("acceptance_criteria", []) if str(item).strip()],
+        "support": {},
+    }
+
+    evidence_items = candidate.get("evidence_items")
+    if isinstance(evidence_items, list):
+        normalized_items: list[dict[str, str]] = []
+        for item in evidence_items:
+            if not isinstance(item, dict):
+                continue
+            normalized: dict[str, str] = {}
+            for key in ("timestamp", "session_ref", "source", "summary"):
+                value = str(item.get(key) or "").strip()
+                if value:
+                    normalized[key] = value
+            if normalized:
+                normalized_items.append(normalized)
+        prompt_candidate["evidence_items"] = normalized_items
+
+    support = candidate.get("support")
+    if isinstance(support, dict):
+        normalized_support: dict[str, int] = {}
+        for key in (
+            "total_packets",
+            "claude_packets",
+            "codex_packets",
+            "total_tool_calls",
+            "unique_workspaces",
+            "recent_packets_7d",
+            "contaminated_packets",
+        ):
+            if key not in support:
+                continue
+            try:
+                normalized_support[key] = int(support.get(key, 0))
+            except (TypeError, ValueError):
+                continue
+        prompt_candidate["support"] = normalized_support
+
+    research_brief = candidate.get("research_brief")
+    if isinstance(research_brief, dict):
+        prompt_candidate["research_brief"] = dict(research_brief)
+
+    return {key: value for key, value in prompt_candidate.items() if key in CLASSIFICATION_PROMPT_KEYS and value not in (None, "")}
+
+
+def build_classification_target_decision(candidate: dict[str, Any]) -> dict[str, Any]:
+    triage_status = str(candidate.get("triage_status") or "").strip()
+    if triage_status == "rejected":
+        inferred = infer_suggested_kind_details(candidate)
+        return {
+            "should_classify": False,
+            "reason_codes": [],
+            "reason_summary": "",
+            "priority": "low",
+            "heuristic_kind": inferred["kind"],
+            "heuristic_reason": inferred["reason"],
+        }
+
+    inferred = infer_suggested_kind_details(candidate)
+    signals = _build_classification_guardrail_signals(candidate)
+    reason_codes: list[str] = []
+    confidence = str(candidate.get("confidence") or "").strip()
+    recommendation = str(candidate.get("research_judgment", {}).get("recommendation") or "").strip()
+
+    if candidate.get("split_origin"):
+        reason_codes.append("split_child")
+    if recommendation == "promote_ready":
+        reason_codes.append("research_promotion")
+    if confidence in {"medium", "weak"}:
+        reason_codes.append("weak_confidence")
+
+    skill_signal = _candidate_has_skill_signal(candidate)
+    if inferred["kind"] == "skill" and bool(signals.get("agent_role_consistency")):
+        reason_codes.append("skill_agent_boundary")
+    elif inferred["kind"] == "agent" and skill_signal:
+        reason_codes.append("skill_agent_boundary")
+
+    declarative_ratio = 0.0
+    try:
+        declarative_ratio = float(signals.get("declarative_ratio") or 0.0)
+    except (TypeError, ValueError):
+        declarative_ratio = 0.0
+    if inferred["kind"] in {"skill", "CLAUDE.md"} and skill_signal and bool(signals.get("claude_md_qualifies")):
+        if bool(signals.get("claude_md_classic_signal")) or 0.35 <= declarative_ratio <= 0.85:
+            reason_codes.append("skill_claude_boundary")
+
+    deduped_reason_codes = list(dict.fromkeys(reason_codes))
+    reason_summary = " / ".join(CLASSIFICATION_TARGET_REASON_SUMMARIES[code] for code in deduped_reason_codes)
+    return {
+        "should_classify": bool(deduped_reason_codes),
+        "reason_codes": deduped_reason_codes,
+        "reason_summary": reason_summary,
+        "priority": _classification_target_priority(deduped_reason_codes),
+        "heuristic_kind": inferred["kind"],
+        "heuristic_reason": inferred["reason"],
+    }
+
+
+def build_classification_target_candidates(
+    prepare_payload: dict[str, Any],
+    judgments_by_candidate_id: dict[str, dict[str, Any]] | None = None,
+    classifications_by_candidate_id: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    classifications_by_candidate_id = classifications_by_candidate_id or {}
+    targets: list[dict[str, Any]] = []
+
+    for candidate in build_proposal_input_candidates(
+        prepare_payload,
+        judgments_by_candidate_id=judgments_by_candidate_id,
+    ):
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        if candidate_id and candidate_id in classifications_by_candidate_id:
+            continue
+        decision = build_classification_target_decision(candidate)
+        if not decision["should_classify"]:
+            continue
+        targets.append(
+            {
+                "candidate_id": candidate_id,
+                "label": str(candidate.get("label") or ""),
+                "triage_status": str(candidate.get("triage_status") or ""),
+                "confidence": str(candidate.get("confidence") or ""),
+                "heuristic_kind": decision["heuristic_kind"],
+                "heuristic_reason": decision["heuristic_reason"],
+                "priority": decision["priority"],
+                "reason_codes": decision["reason_codes"],
+                "reason_summary": decision["reason_summary"],
+                "candidate": build_classification_prompt_candidate(candidate),
+            }
+        )
+
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    targets.sort(
+        key=lambda item: (
+            priority_order.get(str(item.get("priority") or ""), 3),
+            _CONFIDENCE_SORT_PRIORITY.get(str(item.get("confidence") or ""), 3),
+            str(item.get("candidate_id") or ""),
+        )
+    )
+    return targets
+
 
 def _ready_candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int]:
     """Sort ready candidates by confidence tier (strong first), then total_packets descending."""
@@ -4084,48 +4316,13 @@ def build_proposal_sections(
     needs_research: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
 
-    for raw_candidate in prepare_payload.get("candidates", []):
-        if not isinstance(raw_candidate, dict):
-            continue
-        candidate_id = str(raw_candidate.get("candidate_id") or "")
-        candidate = merge_judgment_into_candidate(raw_candidate, judgments_by_candidate_id.get(candidate_id))
+    for candidate in build_proposal_input_candidates(
+        prepare_payload,
+        judgments_by_candidate_id=judgments_by_candidate_id,
+    ):
+        candidate_id = str(candidate.get("candidate_id") or "")
         candidate = merge_classification_into_candidate(candidate, classifications_by_candidate_id.get(candidate_id))
-        split_children = _materialize_split_candidates(candidate)
-        if split_children:
-            for child in split_children:
-                child_triage = str(child.get("triage_status") or "")
-                if child_triage == "ready" and child.get("proposal_ready"):
-                    child = _normalize_candidate_kind(child)
-                    if str(child.get("suggested_kind") or "") == "skill":
-                        scaffold_context = build_skill_scaffold_context(child)
-                        child["skill_scaffold_context"] = scaffold_context
-                        skill_handoff = build_skill_creator_handoff(scaffold_context)
-                        merge_cross_repo_into_skill_handoff(skill_handoff, child, prepare_payload)
-                        child["skill_creator_handoff"] = skill_handoff
-                    elif str(child.get("suggested_kind") or "") in {"hook", "agent"}:
-                        next_step_stub = build_next_step_stub(child)
-                        if next_step_stub is not None:
-                            child["next_step_stub"] = next_step_stub
-                    ready.append(child)
-                elif child_triage == "needs_research":
-                    needs_research.append(child)
-                else:
-                    rejected.append(child)
-            continue
-
         triage_status = str(candidate.get("triage_status") or "")
-
-        if triage_status == "ready" and candidate.get("proposal_ready"):
-            guard_reasons = _ready_state_guard_reasons(candidate)
-            if guard_reasons:
-                candidate["triage_status"] = "needs_research"
-                candidate["proposal_ready"] = False
-                candidate["confidence_reason"] = (
-                    f"{candidate.get('confidence_reason', '')} "
-                    f"(ready guard: {'; '.join(guard_reasons)} のため有望候補に留めました)"
-                ).strip()
-                triage_status = "needs_research"
-
         if triage_status == "ready" and candidate.get("proposal_ready"):
             candidate = _normalize_candidate_kind(candidate)
             if str(candidate.get("suggested_kind") or "") == "skill":

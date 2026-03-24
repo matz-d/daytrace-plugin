@@ -13,6 +13,7 @@ from skill_miner_common import (
     DEFAULT_DECISION_LOG_PATH,
     DEFAULT_SKILL_CREATOR_HANDOFF_DIR,
     PROPOSAL_SOURCE,
+    build_classification_target_candidates,
     build_evidence_chain_lines,
     build_proposal_markdown as build_markdown,
     build_proposal_sections,
@@ -34,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--markdown-classification-detail",
         action="store_true",
         help="Include full classification trace and per-stage reasons in proposal markdown (default: compact one-line summary).",
+    )
+    parser.add_argument(
+        "--classification-targets-only",
+        action="store_true",
+        help="Emit only the candidate list that should receive classification overlays, after prepare+judge merge.",
     )
     return parser
 
@@ -392,6 +398,25 @@ def main() -> None:
         prepare_payload = load_json(Path(args.prepare_file).expanduser().resolve())
         judgments = load_judgments(args.judge_file)
         classifications = load_classification_overlays(args.classification_file)
+        if args.classification_targets_only:
+            targets = build_classification_target_candidates(
+                prepare_payload,
+                judgments_by_candidate_id=judgments,
+                classifications_by_candidate_id=classifications,
+            )
+            emit(
+                {
+                    "status": "success",
+                    "source": PROPOSAL_SOURCE,
+                    "mode": "classification_targets",
+                    "summary": {
+                        "target_count": len(targets),
+                        "target_candidate_ids": [item.get("candidate_id") for item in targets],
+                    },
+                    "classification_targets": targets,
+                }
+            )
+            return
         proposal = build_proposal_sections(
             prepare_payload,
             judgments_by_candidate_id=judgments,

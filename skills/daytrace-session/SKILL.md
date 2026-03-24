@@ -83,6 +83,7 @@ Phase 4 Classification（`ready` / `needs_research` の**曖昧候補のみ**に
 
 - **対象の絞り込み**は `skills/skill-miner/references/classify-target-selection.md` を正とする（開発リポジトリ全体では `docs/skill-miner-classify-targets.md` と同一内容）。`rejected` は原則 overlay を作らない
 - 明らかな `hook`・強い `CLAUDE.md` シグナルでヒューリスティックが閉じている候補は overlay を省略してよい
+- 自動で候補一覧を出したい場合は `skill_miner_proposal.py --classification-targets-only` を先に実行して、返ってきた `classification_targets[]` の `candidate_id` だけに overlay を作る
 - 契約と few-shot は `skills/skill-miner/references/classification-prompt.md` を正とする
 - 1 候補 1 ファイル（例: `$SESSION_TMP/classifications/<candidate_id>.json`）を親エージェントまたは子サブエージェントが**対象候補に限って**生成する
 

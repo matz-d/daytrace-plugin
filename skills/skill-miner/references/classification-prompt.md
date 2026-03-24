@@ -8,7 +8,7 @@
 
 ## 入力（各候補について読むフィールド）
 
-`prepare.json` の `candidates[]` から、対象 `candidate_id` のオブジェクトを 1 件選び、少なくとも以下を根拠に分類する。
+`prepare.json` の `candidates[]`、または `skill_miner_proposal.py --classification-targets-only` の `classification_targets[].candidate` から、対象 `candidate_id` のオブジェクトを 1 件選び、少なくとも以下を根拠に分類する。
 
 | フィールド | 用途 |
 |-----------|------|
@@ -27,6 +27,8 @@
 | `research_brief` | `needs_research` のときの論点（補助） |
 
 **優先ルール**: 判断は `evidence_items` と `label` を中心にし、raw 履歴の再読込はしない（prepare contract のみ）。
+
+`classification_targets[].candidate` は **prompt 入力用のスナップショット**で、上表のキーだけを保持する。内部の merge 状態や補助メタは外側の `reason_codes` / `heuristic_kind` などで見える化し、candidate 本体には混ぜない。
 
 ## 出力 JSON contract（1 ファイル = 1 候補）
 

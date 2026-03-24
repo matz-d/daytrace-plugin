@@ -361,6 +361,21 @@ Top-level shape:
 }
 ```
 
+When `--classification-targets-only` is set:
+
+```json
+{
+  "status": "success",
+  "source": "skill-miner-proposal",
+  "mode": "classification_targets",
+  "summary": {
+    "target_count": 0,
+    "target_candidate_ids": []
+  },
+  "classification_targets": []
+}
+```
+
 Important fields:
 
 - `ready`: proposal-ready candidates
@@ -372,15 +387,19 @@ Important fields:
 - `persistence.decision_log`: append result for the shared JSONL decision log
 - `persistence.skill_creator_handoff`: persisted handoff bundle metadata for `skill` proposals
 - `ready[].classification_trace`: optional classification path for `llm` / `guardrail_override` results
+- `classification_targets[]`: candidates that should receive a classification overlay after prepare + optional judge merge
+- `classification_targets[].candidate`: prompt-ready snapshot limited to the `classification-prompt.md` input contract keys (`candidate_id` through `research_brief`)
 - `--decision-log-path`: optional JSONL output path for `decision_log_stub`; pass the same path used by prepare if you want next-run carry-forward behavior to close the loop
 - `--skill-creator-handoff-dir`: optional output directory for persisted skill scaffold / handoff bundles
 - `--classification-file`: optional JSON overlay with `candidate_id` and `classification.llm_suggested_kind`
+- `--classification-targets-only`: emit only `classification_targets[]` instead of the final proposal sections
 - `--user-decision-file`: optional normalized decision payload; when provided, proposal overlays `adopt` / `defer` / `reject` before persisting the next decision-log row set
 
 Contract notes:
 
 - the CLI has defaults under `~/.daytrace`, but orchestrators should pass persistence paths explicitly so side effects stay intentional
 - `prepare` readback and `proposal` persistence only form one learning loop when they share the same decision-log path
+- `classification_targets[].candidate` is a prompt-input snapshot, not the full internal merged candidate object
 - the proposal JSON is written to stdout; orchestration should redirect it to a session-specific temp file when a later step needs to read it again
 
 ### `skill_miner_decision.py`
