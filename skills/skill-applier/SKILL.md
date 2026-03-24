@@ -84,6 +84,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$S
 - `skill` は Skill Scaffold Draft Spec に従い scaffold context を出す（`references/skill-scaffold.md`）
 - `hook` / `agent` は Guided Creation Contract に従う（`references/hook-agent-nextstep.md` + フォーマット仕様は `references/hook-creation-guide.md` / `references/agent-creation-guide.md`）
 - detail phase でも raw history 全量には戻らない
+- `hook` / `agent` の承認後は **Workspace チェック**を行い、同一 repo なら Claude 直接生成、cross-repo なら handoff JSON を生成する（詳細: `references/hook-agent-nextstep.md`）
 
 ## Decision Writeback
 
@@ -97,8 +98,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$S
 
 - `CLAUDE.md` apply 成功 → `--decision adopt --completion-state completed`
 - `skill` scaffold 提示完了 → `--completion-state completed` は `done` 明示確認時のみ（確認手順は `references/skill-scaffold.md` の「done 確認フロー」に従う）
-- `hook` 生成成功 → `--decision adopt --completion-state completed`
-- `agent` 生成成功 → `--decision adopt --completion-state completed`
+- `hook` 生成成功（同一 repo: ファイル書き込み完了時 / cross-repo: handoff JSON 生成完了時）→ `--decision adopt --completion-state completed`
+- `agent` 生成成功（同一 repo: ファイル書き込み完了時 / cross-repo: handoff JSON 生成完了時）→ `--decision adopt --completion-state completed`
 - `hook` / `agent` 生成をユーザーが承認しなかった場合は `pending` 経由で `defer` 扱い
 - ユーザーが「あとで」「今回は見送る」→ `defer` / `reject` を記録
 
@@ -107,6 +108,6 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$S
 - selected candidate に対して適切なアクションパスが実行されている
 - `CLAUDE.md` の場合: diff preview が表示され、apply/skip の結果が記録されている
 - `skill` の場合: scaffold context が構造化されて提示されている
-- `hook` の場合: 設計案が提示され、承認後 settings.json に hook が生成されている
-- `agent` の場合: 設計案が提示され、承認後 agents/ に .md ファイルが生成されている
+- `hook` の場合: 設計案が提示され、承認後に同一 repo では settings.json と .sh が生成、cross-repo では handoff JSON が生成されている
+- `agent` の場合: 設計案が提示され、承認後に同一 repo では agents/ に .md が生成、cross-repo では handoff JSON が生成されている
 - user decision が writeback されている（選択があった場合）

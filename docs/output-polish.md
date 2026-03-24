@@ -100,8 +100,8 @@ proposal の `suggested_kind` に応じ、**`skill-applier` skill** が定型的
 |------|------------------|
 | `CLAUDE.md` | diff preview → ユーザー確認後に追記・整備（immediate apply path） |
 | `skill` | scaffold / 構造化 context の提示 → **公式の skill-creator（handoff）** へ渡すパス（plugin 内で skill ファイルを勝手にデプロイしない） |
-| `hook` | 設計案 → 承認後に settings 等へ guided creation |
-| `agent` | 設計案 → 承認後に `agents/` 等へ guided creation |
+| `hook` | 設計案 → 承認後に **同一 repo なら** `.claude/hooks/` + `settings.json` へ直接生成。**cross-repo なら** handoff JSON を生成してユーザーに案内 |
+| `agent` | 設計案 → 承認後に **同一 repo なら** `.claude/agents/` へ直接生成。**cross-repo なら** handoff JSON を生成してユーザーに案内 |
 
 daytrace-session の Phase 4（Pattern Mining）で候補選択があった場合も、この skill に委譲して閉じる。
 
