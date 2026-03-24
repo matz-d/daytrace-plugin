@@ -50,7 +50,7 @@ Phase 1 Data Collection:
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/daily_report_projection.py --date today --all-sessions
 ```
 
-Phase 1 の JSON に `report_date` と `output_dir` が含まれる（単日スコープ時）。`output_dir` は projection が **返却前にディレクトリを作成済み**（`~/.daytrace` 未作成でも可）。日報・投稿下書き・提案の Markdown artifact はそこへ保存する（`docs/output-polish.md` §7）。各 skill でも Write 前に親ディレクトリが無ければ作成する。
+Phase 1 の JSON に `report_date` と `output_dir` が含まれる（単日スコープ時）。`output_dir` は projection が **返却前にディレクトリを作成済み**（`~/.daytrace` 未作成でも可）。日報・投稿下書き・提案の Markdown artifact はそこへ保存する（`docs/output-polish.md` §7）。各 skill でも Write 前に親ディレクトリが無ければ作成する。`aggregate.json` は内部デバッグ・再生成調査のための source snapshot として任意で同梱してよいが、テンプレ差し込みや export 用の主データとして扱わない（structured fill 用 JSON は Layer 4 の責務）。
 
 Phase 3 Post Draft (conditional):
 

@@ -262,6 +262,8 @@ B0 観測の方法と優先順位ルールは `references/b0-observation.md` を
 
 - **適用スコープ**（`workspace-local` / `global-personal`）は `docs/output-polish.md` §9-4 の任意メタ。表に列として必須にしない。本文や注記で短く付けてもよい
 - `/skill-miner` 単体実行時も、チャット切れ防止のため同じく `proposal.md` へ保存することを推奨
+- `確度` / `効果` / `アクション` 列は省略しない
+- `効果` 欄は各候補に固有の改善内容を書く。「効率が上がる」「再利用できる」等の汎用文言を全候補に使い回さない。候補の `evidence_items` から読み取れる具体的な効果（例: `毎回の DayTrace 出力レビュー指示が不要になる`）を 1 文で書く
 
 ### Display Label Rules
 
