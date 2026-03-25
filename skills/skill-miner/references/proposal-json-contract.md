@@ -14,6 +14,8 @@
   "needs_research":    [/* candidate objects */],
   "rejected":          [/* candidate objects */],
 
+  "compact_ready_rows": [/* compact table rows for chat */],
+  "compact_ready_markdown": "markdown table for chat-side compact view",
   "markdown":          "rendered proposal markdown (human-readable view)",
   "markdown_classification_detail": false,
   "selection_prompt":  "string | null",
@@ -42,6 +44,35 @@
 `markdown_classification_detail` は `skill_miner_proposal.py` の `--markdown-classification-detail` に対応する。`false`（既定）のときは `markdown` 内の LLM / guardrail 由来の説明を 1 行に圧縮し、`classification_trace` の長い展開は省略する。`ready[]` 各要素の `classification_trace` / `classification_guardrail_signals` は **常に** machine-actionable として保持される。
 
 `summary.triaged_total` は `ready_count + needs_research_count + rejected_count`（proposal 組み立て後の行数）。チャット見出しの「候補合計」や `proposal.md` 先頭の `候補内訳` は **これと各 count を正**とする。`prepare.json` の `summary.total_candidates` だけを併用すると分割材料化やメタ不整合でズレうるため、ユーザー向け件数は `proposal.json` の `summary` を使う。
+
+`compact_ready_rows[]` / `compact_ready_markdown` は chat-side compact 表のための additive field。`daytrace-session` などの下流は、長い `markdown` 全文ではなくこちらを第一画面に使ってよい。
+
+## Compact Ready Row
+
+`compact_ready_rows[]` は `ready[]` を 1 行ずつ chat 用に圧縮した view model。
+
+```json
+{
+  "index": 1,
+  "candidate_id": "string",
+  "label": "identity key",
+  "display_label": "表示専用ラベル",
+  "display_label_source": "provided | label_fallback",
+  "kind": "CLAUDE.md | skill | hook | agent",
+  "confidence": "strong | medium | weak | insufficient",
+  "confidence_label": "高い | 中程度 | まだ弱い | 根拠不足",
+  "effect": "候補固有の効果 1 文",
+  "action": "すぐに追加可 | /skill-creator で生成可 | ...",
+  "selection_label": "choices UI 向けラベル",
+  "apply_scope": "現在のリポジトリ | 別リポジトリ"
+}
+```
+
+補足:
+
+- `display_label` は表示専用。carry-forward / `decision_key` / `content_key` には使わない
+- `apply_scope` は任意。分かる場合だけ入る
+- `compact_ready_markdown` は `apply_scope` を持つ行が 1 件でもあれば scope 列を含む
 
 ## Ready Candidate Object
 

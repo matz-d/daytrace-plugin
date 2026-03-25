@@ -253,6 +253,7 @@ Important fields:
 - `candidates[].evidence_items`: up to 3 proposal-ready evidence entries with `session_ref`, `timestamp`, `source`, `summary`
 - `candidates[].research_targets`: up to 5 suggested refs for deep research on `needs_research` candidates
 - `candidates[].research_brief`: suggested questions and decision rules for deep research
+- `candidates[].subdivision_origin`: present only on candidates re-clustered from an oversized parent cluster. Contains `parent_candidate_id`, `original_size`, `subdivision_threshold`, `sub_cluster_count`. Downstream may treat these as normal candidates but may reflect the subdivision provenance in `evidence_summary`.
 - `unclustered[]`: packets that did not form a repeated cluster
 - `intent_analysis.summary`: `generic_rate`, `synonym_split_rate`, `specificity_distribution`
 - `intent_analysis.items`: anonymized `primary_intent` samples for B0 inspection
@@ -356,6 +357,8 @@ Top-level shape:
   "ready": [],
   "needs_research": [],
   "rejected": [],
+  "compact_ready_rows": [],
+  "compact_ready_markdown": "",
   "selection_prompt": null,
   "markdown": ""
 }
@@ -381,6 +384,8 @@ Important fields:
 - `ready`: proposal-ready candidates
 - `needs_research`: candidates still held back after prepare and optional research judgment
 - `rejected`: candidates and unclustered references that should not be proposed
+- `compact_ready_rows[]`: chat-side compact table rows for `ready[]` (display label, kind, confidence, effect, action, optional scope)
+- `compact_ready_markdown`: markdown table for the compact chat view; downstream can show this instead of the full proposal markdown
 - `markdown`: preformatted proposal sections for the LLM/user-facing output
 - `decision_log_stub`: per-candidate persistence rows that bridge this run to the next `prepare`
 - `user_decision_overlay`: how many normalized user decisions from `--user-decision-file` were matched and applied before persistence
@@ -400,6 +405,7 @@ Contract notes:
 - the CLI has defaults under `~/.daytrace`, but orchestrators should pass persistence paths explicitly so side effects stay intentional
 - `prepare` readback and `proposal` persistence only form one learning loop when they share the same decision-log path
 - `classification_targets[].candidate` is a prompt-input snapshot, not the full internal merged candidate object
+- `compact_ready_rows[].display_label` is display-only metadata; `label` remains the identity key for carry-forward and decision keys
 - the proposal JSON is written to stdout; orchestration should redirect it to a session-specific temp file when a later step needs to read it again
 
 ### `skill_miner_decision.py`

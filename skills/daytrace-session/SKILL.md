@@ -222,6 +222,7 @@ Phase 1 完了直後、Phase 2 に入る前に「今日の DayTrace ダイジェ
     - prepare 出力・judge 出力（あれば）・**生成した classification overlay（あれば）** を `skill_miner_proposal.py` に渡す（`--classification-file` を**作ったファイルだけ**繰り返す）。stdout を shell redirect で `$SESSION_TMP/proposal.json` に保存する
     - `proposal.json` は machine-actionable JSON（contract 詳細は `skill-miner/references/proposal-json-contract.md`）
     - **compact 表を生成する前に**、`ready[]` の各候補について `skill-miner` SKILL の **Display Label Rules** に従って `display_label` を生成する。`proposal.json` の `label`（identity key）は変更しない
+    - `proposal.json` に `compact_ready_rows[]` / `compact_ready_markdown` がある場合はそれを chat-side compact 表の正本として使ってよい。必要なら `display_label` だけ上書きし、`label` は触らない
     - **ユーザー向けチャット**は `skill-miner` SKILL の **compact 表**を優先し、長文は `output_dir` の `proposal.md` に保存する
     - structured judgment log では `observation_contract` を正として使う
     - 近似入力判定は `observation_contract.input_fidelity == "approximate"`、adaptive window 判定は `observation_contract.adaptive_window.expanded` を参照する

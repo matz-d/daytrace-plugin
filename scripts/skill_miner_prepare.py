@@ -32,6 +32,9 @@ from skill_miner_common import (
     DEFAULT_TOP_N,
     GENERIC_TASK_SHAPES,
     GENERIC_TOOL_SIGNATURES,
+    INTENT_STOP_WORDS,
+    OVERSIZED_CLUSTER_MIN_PACKETS,
+    OVERSIZED_CLUSTER_MIN_SHARE,
     PREPARE_SOURCE,
     extract_known_commands,
     build_claude_session_ref,
@@ -112,8 +115,19 @@ SIMILARITY_SNIPPET_WEIGHT = SIMILARITY_WEIGHT_BUDGET["snippet"]
 SIMILARITY_ARTIFACT_WEIGHT = SIMILARITY_WEIGHT_BUDGET["artifacts"]
 SIMILARITY_RULE_WEIGHT = SIMILARITY_WEIGHT_BUDGET["rules"]
 SIMILARITY_TOOL_WEIGHT = SIMILARITY_WEIGHT_BUDGET["tools"]
-SIMILARITY_GENERIC_ONLY_PENALTY = 0.08
+SIMILARITY_GENERIC_ONLY_PENALTY = 0.08  # legacy single-tier value; kept for reference
+
+# Staged generic-only penalty: full when both task AND tool are generic with no
+# artifact/rule signal; partial when only one side is generic or when artifact/rule
+# partially compensates.
+GENERIC_PENALTY_FULL = 0.10
+GENERIC_PENALTY_PARTIAL = 0.04
 SIMILARITY_WEIGHT_TOTAL = sum(SIMILARITY_WEIGHT_BUDGET.values())
+
+# Generic task shapes matching other generic shapes contribute only 30% of
+# their overlap credit.  This prevents review_changes↔review_changes from
+# inflating similarity to the same degree as implement_feature↔implement_feature.
+GENERIC_SHAPE_DISCOUNT = 0.7
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1273,7 +1287,7 @@ def _build_similarity_features(packet: dict[str, Any]) -> dict[str, Any]:
             *[str(value) for value in packet.get("acceptance_criteria", [])[:2] if value],
         ]
     )
-    intent_tokens = tokenize(intent_corpus)
+    intent_tokens = tokenize(intent_corpus) - INTENT_STOP_WORDS
     task_shape_set = set(packet.get("task_shape", []))
     tool_set = set(packet.get("tool_signature", []))
     tool_pattern_set = set(packet.get("tool_argument_patterns", []))
@@ -1299,6 +1313,24 @@ def _build_similarity_features(packet: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _generic_discounted_overlap(left: set[str], right: set[str]) -> float:
+    """Overlap score for task shapes, discounting generic-only intersections.
+
+    Specific shape matches receive full credit while generic-generic matches
+    (e.g. review_changes ↔ review_changes) are scaled by GENERIC_SHAPE_DISCOUNT.
+    Uses max(len) as divisor to stay consistent with overlap_score().
+    """
+    if not left or not right:
+        return 0.0
+    divisor = max(len(left), len(right))
+    if not divisor:
+        return 0.0
+    intersection = left & right
+    specific_count = len(intersection - GENERIC_TASK_SHAPES)
+    generic_count = len(intersection & GENERIC_TASK_SHAPES)
+    return (specific_count + generic_count * GENERIC_SHAPE_DISCOUNT) / divisor
+
+
 def _similarity_score_from_features(left: dict[str, Any], right: dict[str, Any]) -> float:
     left_snippet_tokens = left.get("snippet_tokens", set())
     right_snippet_tokens = right.get("snippet_tokens", set())
@@ -1316,7 +1348,7 @@ def _similarity_score_from_features(left: dict[str, Any], right: dict[str, Any])
     right_rule_names = right.get("rule_names", set())
     snippet = jaccard_score(left_snippet_tokens, right_snippet_tokens)
     intent = jaccard_score(left_intent_tokens, right_intent_tokens)
-    task_shapes = overlap_score(left_task_shapes, right_task_shapes)
+    task_shapes = _generic_discounted_overlap(left_task_shapes, right_task_shapes)
     tools = max(
         jaccard_score(left_tool_set, right_tool_set),
         jaccard_score(left_tool_patterns, right_tool_patterns),
@@ -1340,8 +1372,13 @@ def _similarity_score_from_features(left: dict[str, Any], right: dict[str, Any])
         + (tools * SIMILARITY_TOOL_WEIGHT)
         + (same_specific_shape * SIMILARITY_SPECIFIC_SHAPE_BONUS)
     )
-    if generic_task_only and generic_tool_only and artifacts == 0.0 and rules == 0.0:
-        score -= SIMILARITY_GENERIC_ONLY_PENALTY
+    if generic_task_only and generic_tool_only:
+        if artifacts == 0.0 and rules == 0.0:
+            score -= GENERIC_PENALTY_FULL
+        else:
+            score -= GENERIC_PENALTY_PARTIAL
+    elif (generic_task_only or generic_tool_only) and artifacts == 0.0 and rules == 0.0:
+        score -= GENERIC_PENALTY_PARTIAL
     return round(max(0.0, min(score, 1.0)), 3)
 
 
@@ -1658,6 +1695,109 @@ def build_split_suggestions(group_packets: list[dict[str, Any]], limit: int = 3)
     return [label for label, count in counts.most_common(limit) if count >= 2]
 
 
+# ---------------------------------------------------------------------------
+# Oversized cluster subdivision
+# ---------------------------------------------------------------------------
+
+# Tighter merge threshold used when re-clustering an oversized group.
+# Must be above CLUSTER_MERGE_THRESHOLD (0.55) to produce finer-grained clusters.
+SUBDIVISION_THRESHOLD = 0.65
+
+
+def _build_secondary_features(packet: dict[str, Any]) -> dict[str, Any]:
+    """Extract features unused in primary similarity for oversized cluster re-splitting."""
+    return {
+        "file_set": frozenset(str(f) for f in packet.get("referenced_files", [])[:10] if f),
+        "has_failure": bool(packet.get("workflow_signals", {}).get("failure_hints")),
+        "has_retry": bool(packet.get("workflow_signals", {}).get("retry_hints")),
+        "origin": str(packet.get("origin_hint") or "unknown"),
+        "alignment_status": str(packet.get("intent_tool_alignment", {}).get("status") or "unknown"),
+    }
+
+
+def _secondary_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    """Multiplicative modifier (0.0–1.0) based on secondary features.
+
+    Applied on top of primary similarity to surface differences invisible
+    to the first-pass clustering.
+    """
+    score = 1.0
+    left_files = left.get("file_set", frozenset())
+    right_files = right.get("file_set", frozenset())
+    if left_files and right_files:
+        file_jac = jaccard_score(set(left_files), set(right_files))
+        if file_jac < 0.1:
+            score *= 0.7
+    if left.get("has_failure") != right.get("has_failure"):
+        score *= 0.85
+    if left.get("origin") != right.get("origin"):
+        score *= 0.9
+    return score
+
+
+def subdivide_oversized_cluster(
+    group_indices: list[int],
+    *,
+    sorted_packets: list[dict[str, Any]],
+    features_by_index: list[dict[str, Any]],
+    similarity_cache: dict[tuple[int, int], float],
+    tighter_threshold: float = SUBDIVISION_THRESHOLD,
+    min_sub_cluster_size: int = 2,
+) -> list[list[int]]:
+    """Re-cluster an oversized group at a tighter threshold with secondary features.
+
+    Returns a list of sub-groups (each a list of global indices).
+    Singletons after re-clustering are returned as single-element lists so the
+    caller can route them to unclustered.
+    """
+    if len(group_indices) < min_sub_cluster_size * 2:
+        return [group_indices]
+
+    secondary_features = {idx: _build_secondary_features(sorted_packets[idx]) for idx in group_indices}
+    local_uf = UnionFind(len(group_indices))
+    idx_map = {global_idx: local_idx for local_idx, global_idx in enumerate(group_indices)}
+
+    for i, gi in enumerate(group_indices):
+        for j in range(i + 1, len(group_indices)):
+            gj = group_indices[j]
+            primary_sim = _pair_similarity(
+                gi, gj,
+                features_by_index=features_by_index,
+                similarity_cache=similarity_cache,
+            )
+            adjusted = primary_sim * _secondary_similarity(secondary_features[gi], secondary_features[gj])
+            if adjusted < tighter_threshold:
+                continue
+            li, lj = idx_map[gi], idx_map[gj]
+            lr, rr = local_uf.find(li), local_uf.find(lj)
+            if lr == rr:
+                continue
+            # Complete-link guard within the local sub-clustering
+            allowed = True
+            for lm in local_uf.members[lr]:
+                for rm in local_uf.members[rr]:
+                    gm_l, gm_r = group_indices[lm], group_indices[rm]
+                    pair_sim = _pair_similarity(
+                        gm_l, gm_r,
+                        features_by_index=features_by_index,
+                        similarity_cache=similarity_cache,
+                    )
+                    adj_sim = pair_sim * _secondary_similarity(secondary_features[gm_l], secondary_features[gm_r])
+                    if adj_sim < COMPLETE_LINK_AUDIT_THRESHOLD:
+                        allowed = False
+                        break
+                if not allowed:
+                    break
+            if allowed:
+                local_uf.union(li, lj)
+
+    sub_groups_map: dict[int, list[int]] = defaultdict(list)
+    for local_idx, global_idx in enumerate(group_indices):
+        sub_groups_map[local_uf.find(local_idx)].append(global_idx)
+
+    return list(sub_groups_map.values())
+
+
 def cluster_packets(packets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     if not packets:
         return [], [], {"block_count": 0, "block_comparisons": 0}
@@ -1731,6 +1871,33 @@ def cluster_packets(packets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
     for index in range(len(sorted_packets)):
         groups[union_find.find(index)].append(index)
 
+    # --- Phase: subdivide oversized clusters ---
+    total_packets_all = len(sorted_packets)
+    final_groups: list[tuple[list[int], dict[str, Any] | None]] = []  # (indices, subdivision_origin)
+    for _root, indexes in groups.items():
+        is_oversized = (
+            len(indexes) >= OVERSIZED_CLUSTER_MIN_PACKETS
+            and len(indexes) / total_packets_all >= OVERSIZED_CLUSTER_MIN_SHARE
+        )
+        if is_oversized:
+            sub_groups = subdivide_oversized_cluster(
+                indexes,
+                sorted_packets=sorted_packets,
+                features_by_index=features_by_index,
+                similarity_cache=similarity_cache,
+            )
+            parent_id = sorted_packets[indexes[0]]["packet_id"].replace(":", "-")
+            origin = {
+                "parent_candidate_id": parent_id,
+                "original_size": len(indexes),
+                "subdivision_threshold": SUBDIVISION_THRESHOLD,
+                "sub_cluster_count": len(sub_groups),
+            }
+            for sg in sub_groups:
+                final_groups.append((sg, origin))
+        else:
+            final_groups.append((indexes, None))
+
     latest_timestamp = max(
         (str(packet.get("timestamp")) for packet in sorted_packets if packet.get("timestamp")),
         key=compare_iso_timestamps,
@@ -1739,8 +1906,7 @@ def cluster_packets(packets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
     candidates: list[dict[str, Any]] = []
     unclustered: list[dict[str, Any]] = []
 
-    total_packets_all = len(sorted_packets)
-    for root, indexes in groups.items():
+    for indexes, subdivision_origin in final_groups:
         group_packets = [sorted_packets[index] for index in indexes]
         if len(group_packets) == 1:
             unclustered.append(annotate_unclustered_packet(group_packets[0]))
@@ -1830,6 +1996,8 @@ def cluster_packets(packets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]]
                 [str(packet.get("user_signal_strength") or "") for packet in group_packets]
             ),
         }
+        if subdivision_origin:
+            candidate["subdivision_origin"] = subdivision_origin
         candidate["score"] = candidate_score(support)
         candidate.update(build_candidate_quality(candidate, total_packets_all=total_packets_all))
         candidate["research_brief"] = build_research_brief(candidate)

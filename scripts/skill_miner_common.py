@@ -178,6 +178,76 @@ GENERIC_TOOL_SIGNATURES = {
     "sed",
 }
 
+# High-frequency tokens that inflate intent-similarity without indicating
+# genuine task-level overlap.  Applied during similarity feature extraction
+# (see _build_similarity_features in skill_miner_prepare.py).
+INTENT_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        # English function words
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "can",
+        "shall",
+        "this",
+        "that",
+        "these",
+        "those",
+        "it",
+        "its",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "and",
+        "or",
+        "but",
+        "not",
+        "no",
+        "if",
+        "then",
+        "else",
+        # Generic dev vocabulary (common across unrelated tasks)
+        "file",
+        "code",
+        "change",
+        "update",
+        "add",
+        "remove",
+        "fix",
+        "check",
+        "make",
+        "use",
+        "get",
+        "set",
+        "run",
+        "test",
+    }
+)
+
 VALID_SUGGESTED_KINDS = {"CLAUDE.md", "skill", "hook", "agent"}
 # Substrings for intent/label (normalized lower). Two+ distinct lines must match for agent role consistency.
 AGENT_ROLE_SUBSTRINGS = (
@@ -4347,6 +4417,8 @@ def build_proposal_sections(
 
     ready.sort(key=_ready_candidate_sort_key)
 
+    compact_ready_rows = build_compact_ready_rows(ready)
+    compact_ready_markdown = build_compact_ready_markdown(compact_ready_rows)
     markdown = build_proposal_markdown(
         ready,
         needs_research,
@@ -4369,6 +4441,8 @@ def build_proposal_sections(
         "rejected": rejected,
         "selection_prompt": selection_prompt,
         "markdown": markdown,
+        "compact_ready_rows": compact_ready_rows,
+        "compact_ready_markdown": compact_ready_markdown,
         "markdown_classification_detail": markdown_classification_detail,
         "decision_log_stub": decision_log_stub,
         "learning_feedback": learning_feedback,
@@ -4696,6 +4770,168 @@ _KIND_ACTION_LINES: dict[str, tuple[str, str]] = {
     ),
 }
 
+_TASK_SHAPE_DISPLAY_LABELS: dict[str, str] = {
+    "prepare_report": "レポート作成",
+    "write_markdown": "Markdown整理",
+    "debug_failure": "不具合調査",
+    "implement_feature": "実装作業",
+    "run_tests": "テスト確認",
+    "review_changes": "変更レビュー",
+    "search_code": "コード調査",
+    "inspect_files": "ファイル確認",
+    "summarize_findings": "指摘整理",
+    "edit_config": "設定更新",
+}
+
+_RULE_DISPLAY_LABELS: dict[str, str] = {
+    "findings-first": "findings-first レビュー",
+    "file-line-refs": "行番号付きレビュー",
+    "tests-before-close": "終了前テスト確認",
+    "format-rule": "整形ルール",
+}
+
+_COMPACT_CONFIDENCE_LABELS: dict[str, str] = {
+    "strong": "高い",
+    "medium": "中程度",
+    "weak": "まだ弱い",
+    "insufficient": "根拠不足",
+}
+
+_COMPACT_ACTION_LABELS: dict[str, str] = {
+    "CLAUDE.md": "すぐに追加可",
+    "skill": "/skill-creator で生成可",
+    "hook": "次回 hook 化を依頼",
+    "agent": "次回 agent 化を依頼",
+}
+
+
+def _display_label_for_candidate(candidate: dict[str, Any]) -> str:
+    provided = str(candidate.get("display_label") or "").strip()
+    if provided:
+        return provided
+    label = str(candidate.get("label") or "").strip()
+    if label:
+        return summarize_text(label, 40)
+    representative_examples = [str(item).strip() for item in candidate.get("representative_examples", []) if str(item).strip()]
+    if representative_examples:
+        return summarize_text(representative_examples[0], 40)
+    evidence_items = candidate.get("evidence_items")
+    if isinstance(evidence_items, list):
+        for item in evidence_items:
+            if not isinstance(item, dict):
+                continue
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                return summarize_text(summary, 40)
+    return "Unnamed candidate"
+
+
+def _compact_focus_label(candidate: dict[str, Any]) -> str:
+    rule_hints = _candidate_rule_hints(candidate)
+    for rule in rule_hints:
+        mapped = _RULE_DISPLAY_LABELS.get(rule)
+        if mapped:
+            return mapped
+    task_shapes = _candidate_task_shapes(candidate)
+    for shape in task_shapes:
+        mapped = _TASK_SHAPE_DISPLAY_LABELS.get(shape)
+        if mapped:
+            return mapped
+    return _display_label_for_candidate(candidate)
+
+
+def _compact_effect_for_candidate(candidate: dict[str, Any]) -> str:
+    kind = str(candidate.get("suggested_kind") or "").strip()
+    focus = _compact_focus_label(candidate)
+    if kind == "CLAUDE.md":
+        return f"{focus}の作法を毎回説明せずに済む"
+    if kind == "skill":
+        return f"{focus}を同じ手順で再利用できる"
+    if kind == "hook":
+        return f"{focus}を自動チェックとして挟める"
+    if kind == "agent":
+        return f"{focus}を継続的な役割として委譲できる"
+    return f"{focus}を再利用しやすくできる"
+
+
+def _compact_action_for_candidate(candidate: dict[str, Any]) -> str:
+    kind = str(candidate.get("suggested_kind") or "").strip()
+    return _COMPACT_ACTION_LABELS.get(kind, "次回方針を決める")
+
+
+def _compact_scope_for_candidate(candidate: dict[str, Any]) -> str:
+    if str(candidate.get("suggested_kind") or "").strip() != "skill":
+        return ""
+    handoff = candidate.get("skill_creator_handoff")
+    if not isinstance(handoff, dict):
+        return ""
+    if handoff.get("cross_repo"):
+        return "別リポジトリ"
+    if str(handoff.get("handoff_scope") or "").strip() == "current_repo":
+        return "現在のリポジトリ"
+    return ""
+
+
+def build_compact_ready_rows(ready: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, candidate in enumerate(ready, start=1):
+        if not isinstance(candidate, dict):
+            continue
+        display_label = _display_label_for_candidate(candidate)
+        kind = str(candidate.get("suggested_kind") or "").strip() or "?"
+        confidence = str(candidate.get("confidence") or "").strip()
+        confidence_label = _COMPACT_CONFIDENCE_LABELS.get(confidence, confidence or "不明")
+        scope = _compact_scope_for_candidate(candidate)
+        row = {
+            "index": index,
+            "candidate_id": str(candidate.get("candidate_id") or "").strip(),
+            "label": str(candidate.get("label") or "").strip(),
+            "display_label": display_label,
+            "display_label_source": "provided" if str(candidate.get("display_label") or "").strip() else "label_fallback",
+            "kind": kind,
+            "confidence": confidence,
+            "confidence_label": confidence_label,
+            "effect": _compact_effect_for_candidate(candidate),
+            "action": _compact_action_for_candidate(candidate),
+            "selection_label": f"{display_label} / {kind} / {confidence_label}",
+        }
+        if scope:
+            row["apply_scope"] = scope
+        rows.append(row)
+    return rows
+
+
+def build_compact_ready_markdown(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    include_scope = any(str(row.get("apply_scope") or "").strip() for row in rows if isinstance(row, dict))
+    if include_scope:
+        lines = [
+            "| # | 候補 | 種類 | 適用スコープ | 確度 | 効果 | アクション |",
+            "|---|------|------|--------------|------|------|-----------|",
+        ]
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"| {row.get('index')} | {row.get('display_label')} | {row.get('kind')} | {row.get('apply_scope', '')} | "
+                f"{row.get('confidence_label')} | {row.get('effect')} | {row.get('action')} |"
+            )
+        return "\n".join(lines)
+
+    lines = [
+        "| # | 候補 | 種類 | 確度 | 効果 | アクション |",
+        "|---|------|------|------|------|-----------|",
+    ]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            f"| {row.get('index')} | {row.get('display_label')} | {row.get('kind')} | "
+            f"{row.get('confidence_label')} | {row.get('effect')} | {row.get('action')} |"
+        )
+    return "\n".join(lines)
+
 
 def proposal_item_lines(
     index: int,
@@ -4704,8 +4940,7 @@ def proposal_item_lines(
     include_classification: bool,
     markdown_classification_detail: bool = False,
 ) -> list[str]:
-    # display_label: LLM が生成する表示専用ラベル。なければ Python の label にフォールバック。
-    _display = (candidate.get("display_label") or candidate.get("label") or "Unnamed candidate").strip()
+    _display = _display_label_for_candidate(candidate)
     # cross-repo 候補は title 行にマーカーを付ける（skill 種別のみ）
     _handoff_meta = candidate.get("skill_creator_handoff")
     _is_cross_repo = (
