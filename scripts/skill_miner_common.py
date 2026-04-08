@@ -322,7 +322,7 @@ READY_BLOCKING_FLAG_LABELS = {
     "near_match_dense": "類似パターンとの重複なし",
 }
 
-BROAD_LABEL_TASK_SHAPES = {"prepare_report", "write_markdown", "search_code", "inspect_files", "summarize_findings"}
+BROAD_LABEL_TASK_SHAPES = {"prepare_report", "write_markdown", "search_code", "inspect_files", "summarize_findings", "run_tests"}
 
 COMMON_COMMANDS = {
     "rg",
@@ -351,7 +351,7 @@ TASK_SHAPE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("debug_failure", ("root cause", "debug", "fix", "error", "bug", "failure", "failing", "修正", "不具合")),
     ("implement_feature", ("implement", "feature", "add", "build", "create", "ship", "実装", "追加")),
     ("edit_config", (".env", "config", "settings", "設定", "yaml", "json", "toml")),
-    ("run_tests", ("pytest", "unit test", "integration test", "test", "tests", "spec", "検証")),
+    ("run_tests", ("pytest", "unit test", "integration test", "test", "tests", "spec", "テスト")),
     ("review_changes", ("review", "findings", "pr", "diff", "指摘", "レビュー")),
     ("summarize_findings", ("findings", "severity", "summary", "要約", "まとめ")),
     ("search_code", ("rg", "grep", "search", "検索")),

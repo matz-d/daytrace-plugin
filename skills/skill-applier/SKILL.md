@@ -45,14 +45,14 @@ JSON contract の全体像は `skills/skill-miner/references/proposal-json-contr
 
 | suggested_kind | アクション | 詳細仕様 |
 |---------------|-----------|---------|
-| `CLAUDE.md` | Immediate Apply — diff preview → apply | `references/claude-md-apply.md` |
+| `CLAUDE.md` | Immediate Apply — pre-check → diff preview → apply | `references/claude-md-apply.md` |
 | `skill` | Scaffold Draft — context 構造化 → skill-creator handoff | `references/skill-scaffold.md` |
 | `hook` | Guided Creation — 設計案提示 → 承認後 settings.json に生成 | `references/hook-agent-nextstep.md`, `references/hook-creation-guide.md` |
 | `agent` | Guided Creation — 設計案提示 → 承認後 agents/ に生成 | `references/hook-agent-nextstep.md`, `references/agent-creation-guide.md` |
 
 共通ルール:
 
-- `CLAUDE.md` だけが low-risk immediate apply path を持つ（diff preview → 即時適用）
+- `CLAUDE.md` だけが low-risk immediate apply path を持つ（security / conciseness pre-check → diff preview → 即時適用）
 - `skill` は skill-creator に handoff する（scaffold context の提示のみ）
 - `hook` / `agent` はユーザー承認後にこの skill 内で生成する
 - detail phase でも raw history 全量には戻らない
@@ -106,7 +106,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/skill_miner_proposal.py --prepare-file "$S
 ## Completion Check
 
 - selected candidate に対して適切なアクションパスが実行されている
-- `CLAUDE.md` の場合: diff preview が表示され、apply/skip の結果が記録されている
+- `CLAUDE.md` の場合: pre-check 結果が表示され、diff preview が表示され、apply/skip/reject の結果が記録されている
 - `skill` の場合: scaffold context が構造化されて提示されている
 - `hook` の場合: 設計案が提示され、承認後に同一 repo では settings.json と .sh が生成、cross-repo では handoff JSON が生成されている
 - `agent` の場合: 設計案が提示され、承認後に同一 repo では agents/ に .md が生成、cross-repo では handoff JSON が生成されている
