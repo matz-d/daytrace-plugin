@@ -195,6 +195,44 @@ def _payload_scope_mode(groups: list[dict[str, Any]], source_runs: list[dict[str
     return "mixed" if len(observed_source_scopes) > 1 else "single"
 
 
+def _share_guard_summary(groups: list[dict[str, Any]]) -> dict[str, Any]:
+    auto_excluded_group_ids: list[str] = []
+    caution_group_ids: list[str] = []
+    mixed_scope_group_ids: list[str] = []
+    flagged_groups: list[dict[str, Any]] = []
+
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = str(group.get("id") or "").strip()
+        share_policy = group.get("share_policy") if isinstance(group.get("share_policy"), dict) else {}
+        reasons = [str(reason).strip() for reason in share_policy.get("reasons", []) if str(reason).strip()]
+        if not reasons:
+            continue
+        if bool(share_policy.get("auto_exclude_from_share")) and group_id:
+            auto_excluded_group_ids.append(group_id)
+        elif group_id:
+            caution_group_ids.append(group_id)
+        if bool(group.get("mixed_scope")) and group_id:
+            mixed_scope_group_ids.append(group_id)
+        flagged_groups.append(
+            {
+                "group_id": group_id,
+                "recommended_visibility": str(share_policy.get("recommended_visibility") or "share_safe"),
+                "summary": str(group.get("summary") or ""),
+                "reasons": reasons,
+            }
+        )
+
+    return {
+        "auto_excluded_group_ids": auto_excluded_group_ids,
+        "caution_group_ids": caution_group_ids,
+        "mixed_scope_group_ids": mixed_scope_group_ids,
+        "flagged_groups": flagged_groups[:8],
+        "requires_confirmation": bool(caution_group_ids),
+    }
+
+
 def build_projection_payload(
     *,
     workspace: str | Path = ".",
@@ -350,6 +388,7 @@ def build_projection_payload(
         "sources": [_source_run_summary(source_run) for source_run in source_runs],
         "timeline": timeline,
         "groups": groups,
+        "share_guard": _share_guard_summary(groups),
         "summary": build_summary(source_results, timeline, groups),
     }
     if include_patterns:

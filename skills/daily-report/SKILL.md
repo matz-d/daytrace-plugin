@@ -72,7 +72,10 @@ user-invocable: true
 
 以下の例外条件でのみ、入口直後（データ収集前）の確認を入れてよい:
 
-- **共有用で all-day スコープのみ、workspace ログなし**: 「共有用日報に個人端末の全日ログ（Chrome 履歴等）が含まれますが、このまま進めますか？」と 1 回だけ確認。理由: 機密境界の判断はユーザーに委ねるべき
+- **共有用で `share_guard.requires_confirmation=true`**:
+  「共有用日報に全日ログベースの caution group が含まれますが、このまま進めますか？」と 1 回だけ確認してよい。`share_guard.auto_excluded_group_ids` がある場合も、その group の自動除外とは別に、残る caution group の扱いは確認対象になりうる
+- **共有用で `share_guard.auto_excluded_group_ids` が 1 件以上**:
+  その group は自動除外してよく、チャットと本文で「共有用では browser-heavy / low-confidence cluster を省略した」と明示する。`share_guard.requires_confirmation=true` も併存している場合は、**自動除外後に残る caution group だけ**確認対象とする
 - それ以外は ask せずに degrade して進む
 
 ## Data Collection
@@ -115,8 +118,13 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/daily_report_projection.py --date today --
 - `sources`: source ごとの `success / skipped / error / scope`
 - `timeline`: 時系列イベント
 - `groups`: 近接イベントを束ねた活動グループ
+- `groups[].share_policy`: `share_safe / share_with_caution / private_only` の共有可否ガード
+- `groups[].browser_context`: browser group の host / flow / visit volume の要約（ある場合のみ）
+- `share_guard`: 共有用で自動除外すべき group と caution group の一覧
+- browser-heavy 判定は Chrome の累積 `visit_count` ではなく、**当日の `page_count` / 圧縮後 event 数 / flow 数**を主に使う
 - `summary`: 件数と source 利用状況
 - `report_date` / `output_dir`: 単日スコープ時に付く。Layer 3 artifact の保存先（`docs/output-polish.md` §7）
+- store に旧 derivation の `activities` が残っていても、projection 実行時に **activity derivation version の不一致で再導出**される。新しい `share_policy` / `browser_context` / `share_guard` を出したい時は projection を再実行する
 
 ## Persisted artifacts（Layer 3）
 
@@ -150,12 +158,15 @@ workspace は date-first の主軸ではなく補助フィルタだが、mixed-s
 4. 活動項目は 3-6 個に絞り、「その日何を進めたか」が伝わる粒度に再構成する
 5. `git-history + claude/codex-history` が重なるグループを主要活動候補として優先する
 6. browser 履歴は文脈補助として使い、単独では主項目を作りすぎない
-7. `workspace-file-activity` だけで意味が確定しない場合は「作業痕跡」として控えめに表現する
-8. workspace 指定があっても `all-day` source を repo 限定の根拠として扱わない
-9. source が欠けていても止まらず、分かる範囲で出す
-10. low confidence は本文内注記で処理し、確認セクションへ分離しない
-11. 途中で追加 ask しない
-12. 観測範囲が朝の短時間スナップショットに寄る場合は、**日全体を断定せず「朝時点の状況整理」**として書く
+7. `groups[].share_policy.recommended_visibility == "private_only"` の group は、共有用では自動除外する
+8. `groups[].share_policy.recommended_visibility == "share_with_caution"` の group は、共有用では補助扱いに下げる。単独主項目にしない
+9. `share_guard.auto_excluded_group_ids` がある日は、共有用の `### 今日の概要` か末尾注記で「browser-heavy / low-confidence cluster を共有用から除外した」ことを 1 行だけ明示する
+10. `workspace-file-activity` だけで意味が確定しない場合は「作業痕跡」として控えめに表現する
+11. workspace 指定があっても `all-day` source を repo 限定の根拠として扱わない
+12. source が欠けていても止まらず、分かる範囲で出す
+13. low confidence は本文内注記で処理し、確認セクションへ分離しない
+14. 途中で追加 ask しない
+15. 観測範囲が朝の短時間スナップショットに寄る場合は、**日全体を断定せず「朝時点の状況整理」**として書く
 
 ## Output Rules
 

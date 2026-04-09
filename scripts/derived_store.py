@@ -11,7 +11,7 @@ from common import ensure_datetime, isoformat_or_now, parse_datetime
 from store import bootstrap_store, canonical_json, connect_store, resolve_store_path, stable_hash
 
 
-ACTIVITY_DERIVATION_VERSION = "activities-v3"
+ACTIVITY_DERIVATION_VERSION = "activities-v4"
 PATTERN_DERIVATION_VERSION = "skill-miner-candidate-v1"
 
 
@@ -216,6 +216,16 @@ def _row_to_activity(row: sqlite3.Row) -> dict[str, Any]:
         "confidence_categories": _load_confidence_categories(row, "confidence_categories_json", warnings),
         "scope_breakdown": [str(item) for item in scope_breakdown],
         "mixed_scope": bool(activity_payload.get("mixed_scope", False)) if isinstance(activity_payload, dict) else False,
+        "browser_context": (
+            activity_payload.get("browser_context", {})
+            if isinstance(activity_payload.get("browser_context", {}), dict)
+            else {}
+        ),
+        "share_policy": (
+            activity_payload.get("share_policy", {})
+            if isinstance(activity_payload.get("share_policy", {}), dict)
+            else {}
+        ),
         "source_count": int(row["source_count"]),
         "event_count": int(row["event_count"]),
         "evidence": _safe_json_loads(row, "evidence_json", default=[], warnings=warnings, expected_type=list),
@@ -714,6 +724,8 @@ def derive_activities_from_observations(
                 "confidence_categories": list(group["confidence_categories"]),
                 "scope_breakdown": list(group.get("scope_breakdown", [])),
                 "mixed_scope": bool(group.get("mixed_scope", False)),
+                "browser_context": dict(group.get("browser_context", {})) if isinstance(group.get("browser_context"), dict) else {},
+                "share_policy": dict(group.get("share_policy", {})) if isinstance(group.get("share_policy"), dict) else {},
                 "source_count": int(group["source_count"]),
                 "event_count": int(group["event_count"]),
                 "evidence": list(group["evidence"]),
@@ -868,7 +880,12 @@ def get_activities(
     )
     existing = _read_activities(normalized_store_path, query_fingerprint=query_fingerprint)
     existing_input_fingerprint = existing[0]["input_fingerprint"] if existing else None
-    if refresh or existing_input_fingerprint != current_input_fingerprint:
+    existing_derivation_version = existing[0]["derivation_version"] if existing else None
+    if (
+        refresh
+        or existing_input_fingerprint != current_input_fingerprint
+        or existing_derivation_version != ACTIVITY_DERIVATION_VERSION
+    ):
         activities, input_fingerprint = derive_activities_from_observations(
             observations,
             group_window_minutes=group_window_minutes,

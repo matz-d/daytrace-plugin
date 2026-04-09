@@ -4,10 +4,12 @@ import json
 import re
 import shlex
 import subprocess
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from common import default_chrome_root, ensure_datetime, parse_datetime
 from source_registry import DEFAULT_USER_SOURCES_DIR, load_registry
@@ -30,6 +32,19 @@ EVENT_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 CONTEXT_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_./+-]+|[一-龥ぁ-んァ-ン]+")
 LOW_SIGNAL_CATEGORIES = {"browser", "file_activity"}
 STRONG_SIGNAL_CATEGORIES = {"git", "ai_history"}
+SHARE_EXCLUDE_BROWSER_EVENT_THRESHOLD = 8
+SHARE_EXCLUDE_BROWSER_PAGE_THRESHOLD = 12
+SHARE_EXCLUDE_BROWSER_FLOW_THRESHOLD = 4
+SHARE_EXCLUDE_BROWSER_COMPRESSED_EVENT_THRESHOLD = 3
+SHARE_SENSITIVE_BROWSER_HOSTS = {
+    "x.com",
+    "twitter.com",
+    "facebook.com",
+    "instagram.com",
+    "google.com",
+    "google.co.jp",
+}
+SHARE_SENSITIVE_BROWSER_HOST_SUFFIXES = ("auth0.com",)
 
 
 def report_day_for_local_time(now: datetime) -> date:
@@ -570,6 +585,115 @@ def _should_split_by_context(
     return (current_has_strong and incoming_low_only) or (incoming_has_strong and current_low_only)
 
 
+def _browser_group_context(events: list[dict[str, Any]]) -> dict[str, Any]:
+    host_counts: Counter[str] = Counter()
+    flow_counts: Counter[str] = Counter()
+    total_page_count = 0
+    compressed_event_count = 0
+
+    for event in events:
+        details = event.get("details")
+        if not isinstance(details, dict):
+            continue
+        host = str(details.get("host") or "").strip().lower()
+        if not host:
+            raw_url = str(details.get("url") or "").strip()
+            if raw_url:
+                host = re.sub(r"^www\.", "", urlsplit(raw_url).netloc.split(":", 1)[0].lower())
+        flow = str(details.get("flow_key") or "").strip().lower()
+        if host:
+            host_counts[host] += 1
+        if flow:
+            flow_counts[flow] += 1
+        try:
+            total_page_count += int(details.get("page_count", 1) or 1)
+        except (TypeError, ValueError):
+            total_page_count += 1
+        if bool(details.get("compressed", False)):
+            compressed_event_count += 1
+
+    dominant_host = ""
+    dominant_host_share = 0.0
+    if host_counts:
+        dominant_host, dominant_host_count = host_counts.most_common(1)[0]
+        dominant_host_share = round(dominant_host_count / max(sum(host_counts.values()), 1), 3)
+
+    sensitive_hosts = sorted(
+        host
+        for host in host_counts
+        if host in SHARE_SENSITIVE_BROWSER_HOSTS or host.endswith(SHARE_SENSITIVE_BROWSER_HOST_SUFFIXES)
+    )
+
+    return {
+        "host_count": len(host_counts),
+        "hosts": sorted(host_counts.keys())[:8],
+        "dominant_host": dominant_host or None,
+        "dominant_host_share": dominant_host_share,
+        "flow_count": len(flow_counts),
+        "flows": sorted(flow_counts.keys())[:8],
+        "total_page_count": total_page_count,
+        "compressed_event_count": compressed_event_count,
+        "sensitive_hosts": sensitive_hosts,
+        "sensitive_host_count": len(sensitive_hosts),
+    }
+
+
+def _group_share_policy(
+    events: list[dict[str, Any]],
+    *,
+    categories: set[str],
+    confidence: str,
+    mixed_scope: bool,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    auto_exclude_from_share = False
+    requires_confirmation = False
+    browser_context = _browser_group_context(events) if "browser" in categories else None
+
+    if mixed_scope:
+        reasons.append("mixed_scope")
+        requires_confirmation = True
+
+    if categories == {"browser"} and confidence == "low":
+        reasons.append("browser_only_low_confidence")
+        requires_confirmation = True
+        browser_event_count = len(events)
+        total_page_count = int((browser_context or {}).get("total_page_count", 0) or 0)
+        flow_count = int((browser_context or {}).get("flow_count", 0) or 0)
+        compressed_event_count = int((browser_context or {}).get("compressed_event_count", 0) or 0)
+        if browser_event_count >= SHARE_EXCLUDE_BROWSER_EVENT_THRESHOLD:
+            reasons.append("oversized_browser_cluster")
+            auto_exclude_from_share = True
+        if total_page_count >= SHARE_EXCLUDE_BROWSER_PAGE_THRESHOLD:
+            reasons.append("high_browser_page_volume")
+            auto_exclude_from_share = True
+        if flow_count >= SHARE_EXCLUDE_BROWSER_FLOW_THRESHOLD:
+            reasons.append("high_browser_flow_diversity")
+            auto_exclude_from_share = True
+        if compressed_event_count >= SHARE_EXCLUDE_BROWSER_COMPRESSED_EVENT_THRESHOLD:
+            reasons.append("dense_browser_flow_cluster")
+            auto_exclude_from_share = True
+        if int((browser_context or {}).get("host_count", 0) or 0) >= 3:
+            reasons.append("multi_domain_browser_cluster")
+            auto_exclude_from_share = True
+        if int((browser_context or {}).get("sensitive_host_count", 0) or 0) > 0:
+            reasons.append("share_sensitive_browser_hosts")
+            auto_exclude_from_share = True
+
+    recommended_visibility = "share_safe"
+    if auto_exclude_from_share:
+        recommended_visibility = "private_only"
+    elif requires_confirmation:
+        recommended_visibility = "share_with_caution"
+
+    return {
+        "recommended_visibility": recommended_visibility,
+        "auto_exclude_from_share": auto_exclude_from_share,
+        "requires_confirmation": requires_confirmation,
+        "reasons": reasons,
+    }
+
+
 def build_groups(
     timeline: list[dict[str, Any]],
     *,
@@ -647,6 +771,13 @@ def build_groups(
                 scope_modes.add(mode)
         scope_breakdown = sorted(scope_modes)
         mixed_scope = len(scope_modes) > 1
+        browser_context = _browser_group_context(events) if "browser" in categories else None
+        share_policy = _group_share_policy(
+            events,
+            categories=categories,
+            confidence=confidence,
+            mixed_scope=mixed_scope,
+        )
 
         # Salience-based evidence: prioritise git > ai_history > browser > file_activity
         def _evidence_sort_key(ev: dict[str, Any]) -> tuple[int, str]:
@@ -691,6 +822,8 @@ def build_groups(
                 "mixed_scope": mixed_scope,
                 "source_count": len(source_names),
                 "event_count": len(events),
+                **({"browser_context": browser_context} if browser_context else {}),
+                "share_policy": share_policy,
                 "evidence": evidence,
                 "evidence_overflow_count": max(0, len(events) - evidence_limit),
                 "events": events,

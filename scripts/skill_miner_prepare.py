@@ -2264,6 +2264,7 @@ def main() -> None:
                 "top_n": args.top_n,
                 "max_unclustered": args.max_unclustered,
                 "workspace": str(workspace) if workspace else None,
+                "invocation_workspace": str(resolved_workspace),
                 "all_sessions": args.all_sessions,
                 "observation_mode": "all-sessions" if args.all_sessions else "workspace",
                 "input_source": selected_input_source,

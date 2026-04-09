@@ -3407,14 +3407,14 @@ def _resolved_workspace_path(raw: str | None) -> str | None:
         return text
 
 
-def build_cross_repo_handoff_metadata(
+def build_candidate_apply_scope_metadata(
     candidate: dict[str, Any],
     prepare_payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Schema v2 fields for skill-creator handoff (cross-repo UX). Merged into skill_creator_handoff."""
+    """Infer whether a candidate applies to the current repo, another repo, or needs confirmation."""
     prepare_payload = prepare_payload or {}
     config = prepare_payload.get("config") if isinstance(prepare_payload.get("config"), dict) else {}
-    raw_current = config.get("workspace")
+    raw_current = config.get("workspace") or config.get("invocation_workspace")
     current_workspace = _resolved_workspace_path(str(raw_current).strip()) if isinstance(raw_current, str) and raw_current.strip() else None
 
     dominant_workspace = _resolved_workspace_path(str(candidate.get("dominant_workspace") or "").strip() or None)
@@ -3435,15 +3435,23 @@ def build_cross_repo_handoff_metadata(
         unique_ws = 0
 
     signals: list[str] = []
-    cross_repo = False
-    handoff_scope = "current_repo"
+    scope = "uncertain"
     confidence = "low"
     target_hint: str | None = None
     resolution_note = ""
 
-    if current_workspace and dominant_workspace and dominant_workspace != current_workspace:
-        cross_repo = True
-        handoff_scope = "other_repo"
+    current_matches_dominant = bool(
+        current_workspace
+        and dominant_workspace
+        and (
+            dominant_workspace == current_workspace
+            or is_within_path(dominant_workspace, current_workspace)
+            or is_within_path(current_workspace, dominant_workspace)
+        )
+    )
+
+    if current_workspace and dominant_workspace and not current_matches_dominant:
+        scope = "other_repo"
         target_hint = dominant_workspace
         signals.append("dominant_workspace_mismatch")
         confidence = "high"
@@ -3455,17 +3463,28 @@ def build_cross_repo_handoff_metadata(
         outside = [
             p
             for p in path_examples
-            if p != current_workspace and not is_within_path(p, current_workspace)
+            if p != current_workspace
+            and not is_within_path(p, current_workspace)
+            and not is_within_path(current_workspace, p)
         ]
         if outside:
-            cross_repo = True
-            handoff_scope = "other_repo"
+            scope = "other_repo"
             target_hint = outside[0]
             signals.append("packet_workspace_outside_config_workspace")
             confidence = "medium"
             resolution_note = (
                 "証跡の workspace の一部が観測時の workspace ルート外です。別リポジトリのログが混ざっている可能性があります。"
             )
+    elif current_workspace and dominant_workspace and current_matches_dominant:
+        scope = "current_repo"
+        target_hint = dominant_workspace
+        confidence = "high"
+        resolution_note = "観測 workspace と同一リポジトリ向けの候補として扱っています。"
+    elif current_workspace and not dominant_workspace:
+        scope = "current_repo"
+        target_hint = current_workspace
+        confidence = "medium"
+        resolution_note = "観測 workspace と同一リポジトリ向けの候補として扱っています。"
     elif not current_workspace and dominant_workspace:
         target_hint = dominant_workspace
         signals.append("prepare_workspace_unset")
@@ -3473,13 +3492,17 @@ def build_cross_repo_handoff_metadata(
             "観測に workspace フィルタが無い実行です。適用先はログ上の workspace を優先して確認してください。"
         )
         confidence = "low"
-    elif unique_ws >= 2 and not cross_repo:
+    elif unique_ws >= 2:
         signals.append("multi_workspace_cluster")
         resolution_note = "同一クラスタ内に複数 workspace があります。適用先を手元で確認してください。"
         confidence = "low"
 
-    if not cross_repo:
+    if scope != "other_repo":
         target_hint = target_hint or current_workspace or dominant_workspace
+        if scope == "uncertain" and current_workspace and target_hint == current_workspace:
+            scope = "current_repo"
+        elif scope == "uncertain" and not current_workspace and not dominant_workspace and unique_ws <= 1:
+            scope = "current_repo"
         if not resolution_note:
             resolution_note = "観測 workspace と同一リポジトリ向けの候補として扱っています。"
 
@@ -3490,7 +3513,42 @@ def build_cross_repo_handoff_metadata(
         except (OSError, ValueError, TypeError):
             display_name = target_hint
 
-    if cross_repo:
+    display_scope = {
+        "current_repo": "現在のリポジトリ",
+        "other_repo": "別リポジトリ",
+        "uncertain": "要確認",
+    }.get(scope, "要確認")
+
+    return {
+        "scope": scope,
+        "display_scope": display_scope,
+        "cross_repo": scope == "other_repo",
+        "target_workspace_hint": target_hint,
+        "current_workspace": current_workspace,
+        "resolution_note": resolution_note,
+        "confidence": confidence,
+        "detection_signals": signals,
+        "target_repo_display_name": display_name,
+        "target_path_examples": path_examples[:3],
+    }
+
+
+def build_cross_repo_handoff_metadata(
+    candidate: dict[str, Any],
+    prepare_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Schema v2 fields for skill-creator handoff (cross-repo UX). Merged into skill_creator_handoff."""
+    scope_meta = build_candidate_apply_scope_metadata(candidate, prepare_payload)
+    scope = str(scope_meta.get("scope") or "uncertain")
+    target_hint = str(scope_meta.get("target_workspace_hint") or "").strip() or None
+    current_workspace = scope_meta.get("current_workspace")
+    resolution_note = str(scope_meta.get("resolution_note") or "").strip()
+    confidence = str(scope_meta.get("confidence") or "low").strip() or "low"
+    display_name = scope_meta.get("target_repo_display_name")
+    path_examples = scope_meta.get("target_path_examples")
+    signals = scope_meta.get("detection_signals")
+
+    if scope == "other_repo":
         execution_instruction = "\n".join(
             [
                 "別リポジトリ向けの可能性が高いです。現在の CWD だけを信頼しないでください。",
@@ -3501,7 +3559,7 @@ def build_cross_repo_handoff_metadata(
                 "5. この handoff の context_file（JSON bundle）は scaffold としてプロンプトに含める",
             ]
         )
-    else:
+    elif scope == "current_repo":
         base = target_hint or current_workspace or "このリポジトリ"
         execution_instruction = "\n".join(
             [
@@ -3511,19 +3569,29 @@ def build_cross_repo_handoff_metadata(
                 "4. /skill-creator を実行し、この handoff の scaffold 情報を渡す",
             ]
         )
+    else:
+        base = target_hint or current_workspace or "ログの workspace"
+        execution_instruction = "\n".join(
+            [
+                f"1. 適用先のリポジトリを確認する（目安: {base}）",
+                "2. handoff を正本扱いせず、repo の生ファイル・実データを先に確認する",
+                "3. 適用先が確定したら、そのリポジトリを開いて /skill-creator を実行する",
+                "4. 既存 artifact がある場合は保守・更新 skill として再設計してよい",
+            ]
+        )
 
     meta = {
         "handoff_schema_version": 2,
-        "cross_repo": cross_repo,
+        "cross_repo": scope == "other_repo",
         "target_workspace_hint": target_hint,
         "current_workspace": current_workspace,
-        "handoff_scope": handoff_scope,
+        "handoff_scope": scope,
         "execution_instruction": execution_instruction,
         "workspace_resolution_note": resolution_note,
         "cross_repo_confidence": confidence,
-        "detection_signals": signals,
+        "detection_signals": signals if isinstance(signals, list) else [],
         "target_repo_display_name": display_name,
-        "target_path_examples": path_examples[:3],
+        "target_path_examples": path_examples if isinstance(path_examples, list) else [],
     }
     return meta
 
@@ -4427,6 +4495,42 @@ def _ready_candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int]:
     return (_CONFIDENCE_SORT_PRIORITY.get(conf, 3), -total)
 
 
+def _candidate_apply_scope_bucket(candidate: dict[str, Any]) -> str:
+    meta = candidate.get("apply_scope_metadata")
+    if isinstance(meta, dict):
+        scope = str(meta.get("scope") or "").strip()
+        if scope in {"current_repo", "other_repo", "uncertain"}:
+            return scope
+
+    handoff = candidate.get("skill_creator_handoff")
+    if isinstance(handoff, dict):
+        if handoff.get("cross_repo"):
+            return "other_repo"
+        handoff_scope = str(handoff.get("handoff_scope") or "").strip()
+        if handoff_scope in {"current_repo", "other_repo", "uncertain"}:
+            return handoff_scope
+    return "current_repo"
+
+
+def _partition_ready_candidates(ready: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    sections = {
+        "current_repo": [],
+        "other_repo": [],
+        "uncertain": [],
+    }
+    for candidate in ready:
+        sections[_candidate_apply_scope_bucket(candidate)].append(candidate)
+    return sections
+
+
+def _other_repo_heading(other_ready: list[dict[str, Any]], uncertain_ready: list[dict[str, Any]]) -> str:
+    if other_ready and uncertain_ready:
+        return "### 別リポジトリ向け / 要確認"
+    if other_ready:
+        return "### 別リポジトリ向け"
+    return "### 要確認"
+
+
 def build_proposal_sections(
     prepare_payload: dict[str, Any],
     judgments_by_candidate_id: dict[str, dict[str, Any]] | None = None,
@@ -4446,6 +4550,7 @@ def build_proposal_sections(
     ):
         candidate_id = str(candidate.get("candidate_id") or "")
         candidate = merge_classification_into_candidate(candidate, classifications_by_candidate_id.get(candidate_id))
+        candidate["apply_scope_metadata"] = build_candidate_apply_scope_metadata(candidate, prepare_payload)
         triage_status = str(candidate.get("triage_status") or "")
         if triage_status == "ready" and candidate.get("proposal_ready"):
             candidate = _normalize_candidate_kind(candidate)
@@ -4471,6 +4576,8 @@ def build_proposal_sections(
 
     ready, needs_research, rejected = _dedupe_candidate_sections(ready, needs_research, rejected)
     ready.sort(key=_ready_candidate_sort_key)
+    ready_sections = _partition_ready_candidates(ready)
+    ready = ready_sections["current_repo"] + ready_sections["other_repo"] + ready_sections["uncertain"]
 
     compact_ready_rows = build_compact_ready_rows(ready)
     compact_ready_markdown = build_compact_ready_markdown(compact_ready_rows)
@@ -4492,6 +4599,9 @@ def build_proposal_sections(
     observation_contract = build_observation_contract(prepare_payload)
     return {
         "ready": ready,
+        "ready_current_repo": ready_sections["current_repo"],
+        "ready_other_repo": ready_sections["other_repo"],
+        "ready_uncertain": ready_sections["uncertain"],
         "needs_research": needs_research,
         "rejected": rejected,
         "selection_prompt": selection_prompt,
@@ -4504,6 +4614,9 @@ def build_proposal_sections(
         "observation_contract": observation_contract,
         "summary": {
             "ready_count": len(ready),
+            "ready_current_repo_count": len(ready_sections["current_repo"]),
+            "ready_other_repo_count": len(ready_sections["other_repo"]),
+            "ready_uncertain_count": len(ready_sections["uncertain"]),
             "needs_research_count": len(needs_research),
             "rejected_count": len(rejected),
             "triaged_total": len(ready) + len(needs_research) + len(rejected),
@@ -4705,17 +4818,45 @@ def build_proposal_markdown(
         f"> 候補内訳: 適用 {len(ready)} / 追加観測 {len(needs_research)} / 観測ノート {len(rejected)}（合計 {triaged_total}）"
     )
     lines.append("")
+    ready_sections = _partition_ready_candidates(ready)
+    current_ready = ready_sections["current_repo"]
+    other_ready = ready_sections["other_repo"]
+    uncertain_ready = ready_sections["uncertain"]
     lines.append("## 提案（アクション候補）")
     if ready:
-        for index, candidate in enumerate(ready, start=1):
-            lines.extend(
-                proposal_item_lines(
-                    index,
-                    candidate,
-                    include_classification=True,
-                    markdown_classification_detail=markdown_classification_detail,
+        if other_ready or uncertain_ready:
+            sections: list[tuple[str, list[dict[str, Any]]]] = []
+            if current_ready:
+                sections.append(("### 現在のリポジトリ向け", current_ready))
+            if other_ready or uncertain_ready:
+                sections.append((_other_repo_heading(other_ready, uncertain_ready), other_ready + uncertain_ready))
+
+            running_index = 1
+            for heading, candidates in sections:
+                lines.append(heading)
+                for candidate in candidates:
+                    lines.extend(
+                        proposal_item_lines(
+                            running_index,
+                            candidate,
+                            include_classification=True,
+                            markdown_classification_detail=markdown_classification_detail,
+                        )
+                    )
+                    running_index += 1
+                lines.append("")
+            if lines[-1] == "":
+                lines.pop()
+        else:
+            for index, candidate in enumerate(ready, start=1):
+                lines.extend(
+                    proposal_item_lines(
+                        index,
+                        candidate,
+                        include_classification=True,
+                        markdown_classification_detail=markdown_classification_detail,
+                    )
                 )
-            )
     else:
         lines.append("今回は有力候補なし")
         detected_count = _triaged_candidate_count(ready, needs_research, rejected)
@@ -5036,14 +5177,12 @@ def _compact_action_for_candidate(candidate: dict[str, Any]) -> str:
 
 
 def _compact_scope_for_candidate(candidate: dict[str, Any]) -> str:
-    if str(candidate.get("suggested_kind") or "").strip() != "skill":
-        return ""
-    handoff = candidate.get("skill_creator_handoff")
-    if not isinstance(handoff, dict):
-        return ""
-    if handoff.get("cross_repo"):
+    scope = _candidate_apply_scope_bucket(candidate)
+    if scope == "other_repo":
         return "別リポジトリ"
-    if str(handoff.get("handoff_scope") or "").strip() == "current_repo":
+    if scope == "uncertain":
+        return "要確認"
+    if scope == "current_repo" and str(candidate.get("suggested_kind") or "").strip() == "skill":
         return "現在のリポジトリ"
     return ""
 
@@ -5070,6 +5209,7 @@ def build_compact_ready_rows(ready: list[dict[str, Any]]) -> list[dict[str, Any]
             "effect": _compact_effect_for_candidate(candidate),
             "action": _compact_action_for_candidate(candidate),
             "selection_label": f"{display_label} / {kind} / {confidence_label}",
+            "apply_scope_key": _candidate_apply_scope_bucket(candidate),
         }
         if scope:
             row["apply_scope"] = scope
@@ -5077,10 +5217,7 @@ def build_compact_ready_rows(ready: list[dict[str, Any]]) -> list[dict[str, Any]
     return rows
 
 
-def build_compact_ready_markdown(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return ""
-    include_scope = any(str(row.get("apply_scope") or "").strip() for row in rows if isinstance(row, dict))
+def _build_compact_ready_table(rows: list[dict[str, Any]], *, include_scope: bool) -> str:
     if include_scope:
         lines = [
             "| # | 候補 | 種類 | 適用スコープ | 確度 | 効果 | アクション |",
@@ -5109,21 +5246,36 @@ def build_compact_ready_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def build_compact_ready_markdown(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+    current_rows = [row for row in rows if isinstance(row, dict) and str(row.get("apply_scope_key") or "") == "current_repo"]
+    other_rows = [row for row in rows if isinstance(row, dict) and str(row.get("apply_scope_key") or "") == "other_repo"]
+    uncertain_rows = [row for row in rows if isinstance(row, dict) and str(row.get("apply_scope_key") or "") == "uncertain"]
+
+    if other_rows or uncertain_rows:
+        sections: list[str] = []
+        if current_rows:
+            sections.append("### 現在のリポジトリ向け")
+            sections.append(_build_compact_ready_table(current_rows, include_scope=False))
+        if other_rows or uncertain_rows:
+            sections.append(_other_repo_heading(other_rows, uncertain_rows))
+            sections.append(_build_compact_ready_table(other_rows + uncertain_rows, include_scope=bool(uncertain_rows)))
+        return "\n\n".join(section for section in sections if section)
+
+    include_scope = any(str(row.get("apply_scope") or "").strip() for row in rows if isinstance(row, dict))
+    return _build_compact_ready_table(rows, include_scope=include_scope)
+
+
 def _candidate_identity_merge_key(candidate: dict[str, Any]) -> str:
     kind = str(candidate.get("suggested_kind") or "").strip()
     raw_label = normalized_directive_label(str(candidate.get("label") or ""))
     display_label = normalized_directive_label(_display_label_for_candidate(candidate))
     identity = raw_label or display_label or str(candidate.get("candidate_id") or candidate.get("packet_id") or "").strip()
     scope_marker = ""
-    if kind == "skill":
-        handoff = candidate.get("skill_creator_handoff")
-        if isinstance(handoff, dict):
-            if handoff.get("cross_repo"):
-                scope_marker = "::scope:cross_repo"
-            else:
-                handoff_scope = str(handoff.get("handoff_scope") or "").strip()
-                if handoff_scope and handoff_scope != "current_repo":
-                    scope_marker = f"::scope:{handoff_scope}"
+    scope_bucket = _candidate_apply_scope_bucket(candidate)
+    if scope_bucket != "current_repo":
+        scope_marker = f"::scope:{scope_bucket}"
     key = f"{kind}:{identity}" if kind else identity
     return key + scope_marker
 
@@ -5292,18 +5444,21 @@ def proposal_item_lines(
                 src_label = "llm" if source == "llm" else "guardrail"
                 short = reason if len(reason) <= 120 else (reason[:117] + "...")
                 lines.append(f"   分類: 最終={kind}（{src_label}）" + (f" — {short}" if short else ""))
-        handoff_scope = candidate.get("skill_creator_handoff")
-        if str(candidate.get("suggested_kind") or "") == "skill" and isinstance(handoff_scope, dict):
-            if handoff_scope.get("cross_repo"):
-                lines.append("   適用先: 別リポジトリ（現在の CWD ではなく、handoff の target repo で /skill-creator）")
-            elif str(handoff_scope.get("handoff_scope") or "") == "current_repo":
-                if str(handoff_scope.get("cross_repo_confidence") or "").strip() == "low":
-                    lines.append("   適用先: 要確認（現在のリポジトリとは断定しません）")
+        apply_scope = candidate.get("apply_scope_metadata")
+        if isinstance(apply_scope, dict):
+            scope = str(apply_scope.get("scope") or "").strip()
+            target_hint = str(apply_scope.get("target_workspace_hint") or "").strip()
+            if scope == "other_repo":
+                if str(candidate.get("suggested_kind") or "") == "skill":
+                    lines.append("   適用先: 別リポジトリ（現在の CWD ではなく、handoff の target repo で /skill-creator）")
                 else:
-                    lines.append("   適用先: 現在のリポジトリ")
+                    lines.append("   適用先: 別リポジトリ")
+            elif scope == "current_repo":
+                lines.append("   適用先: 現在のリポジトリ")
             else:
-                lines.append("   適用先: 要確認（観測時 workspace からは断定しません）")
-            res_note = str(handoff_scope.get("workspace_resolution_note") or "").strip()
+                hint = f"（目安: {target_hint}）" if target_hint else "（観測時 workspace からは断定しません）"
+                lines.append(f"   適用先: 要確認 {hint}")
+            res_note = str(apply_scope.get("resolution_note") or "").strip()
             if res_note and len(res_note) <= 200:
                 lines.append(f"   workspace 注記: {res_note}")
     _CONFIDENCE_LABELS = {
