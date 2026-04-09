@@ -29,6 +29,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 AGGREGATE = SCRIPT_DIR / "aggregate.py"
 DEFAULT_SOURCES_FILE = SCRIPT_DIR / "sources.json"
 HYDRATE_TIMEOUT_SEC = 90
+REPORT_DAY_BOUNDARY_HOUR = 6
 
 
 def artifact_output_paths(
@@ -37,7 +38,7 @@ def artifact_output_paths(
     resolved_since: str | None,
     resolved_until: str | None,
 ) -> tuple[str | None, str | None]:
-    """Canonical report_date (YYYY-MM-DD) and ~/.daytrace/output/<date>/ for Layer 3 artifacts."""
+    """Canonical local report_date (YYYY-MM-DD) and ~/.daytrace/output/<date>/ for Layer 3 artifacts."""
     if normalized_date:
         report_date = normalized_date
     elif resolved_since and resolved_until and resolved_since == resolved_until:
@@ -169,6 +170,31 @@ def _source_run_as_result(source_run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _payload_scope_mode(groups: list[dict[str, Any]], source_runs: list[dict[str, Any]]) -> str:
+    if any(bool(group.get("mixed_scope")) for group in groups):
+        return "mixed"
+
+    group_scopes = {
+        str(scope).strip()
+        for group in groups
+        if isinstance(group, dict)
+        for scope in group.get("scope_breakdown", [])
+        if str(scope).strip()
+    }
+    if len(group_scopes) > 1:
+        return "mixed"
+
+    observed_source_scopes = {
+        str(source_run.get("scope_mode") or "").strip()
+        for source_run in source_runs
+        if isinstance(source_run, dict)
+        and str(source_run.get("status") or "") == "success"
+        and int(source_run.get("events_count", 0)) > 0
+        and str(source_run.get("scope_mode") or "").strip()
+    }
+    return "mixed" if len(observed_source_scopes) > 1 else "single"
+
+
 def build_projection_payload(
     *,
     workspace: str | Path = ".",
@@ -285,6 +311,7 @@ def build_projection_payload(
             timeline[i]["group_id"] = fp_to_group_id[fp]
 
     source_results = [_source_run_as_result(source_run) for source_run in source_runs]
+    payload_scope_mode = _payload_scope_mode(groups, source_runs)
 
     report_date, output_dir = artifact_output_paths(
         normalized_date=normalized_date,
@@ -298,7 +325,12 @@ def build_projection_payload(
         "generated_at": isoformat(datetime.now().astimezone()),
         "workspace": str(resolved_workspace),
         "report_date": report_date,
+        "report_date_context": {
+            "timezone_basis": "local",
+            "day_boundary_hour": REPORT_DAY_BOUNDARY_HOUR,
+        },
         "output_dir": output_dir,
+        "scope_mode": payload_scope_mode,
         "filters": {
             "since": since,
             "until": until,

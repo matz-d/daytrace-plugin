@@ -4127,7 +4127,61 @@ def _ready_state_guard_reasons(candidate: dict[str, Any]) -> list[str]:
     if unresolved_flags:
         labels = [READY_BLOCKING_FLAG_LABELS.get(flag, flag) for flag in unresolved_flags]
         reasons.append(f"未解消の注意信号={','.join(labels)}")
+    alignment_reason = _candidate_alignment_guard_reason(candidate)
+    if alignment_reason:
+        reasons.append(alignment_reason)
     return reasons
+
+
+def _candidate_alignment_guard_reason(candidate: dict[str, Any]) -> str:
+    required_keywords: set[str] = set()
+    active_signals: set[str] = set()
+    label = normalize_match_text(str(candidate.get("label") or ""))
+    for signal, keywords in _READY_ALIGNMENT_RULES:
+        should_check = signal in _candidate_rule_hints(candidate) or pattern_in_text(label, signal.replace("_", " "))
+        if signal == "prepare_report":
+            should_check = should_check or (
+                signal in _candidate_task_shapes(candidate)
+                and any(hint in {"report", "markdown"} for hint in _candidate_artifact_hints(candidate))
+            )
+        if signal == "review_changes":
+            should_check = should_check or (
+                signal in _candidate_task_shapes(candidate)
+                and any(hint in {"review"} for hint in _candidate_artifact_hints(candidate))
+            )
+        if should_check:
+            required_keywords.update(keywords)
+            active_signals.add(signal)
+
+    if not required_keywords:
+        return ""
+    evidence_chunks: list[str] = []
+    for key in ("evidence_summary", "confidence_reason"):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            evidence_chunks.append(value)
+    evidence_chunks.extend(_candidate_text_list(candidate, "intent_trace", limit=MAX_INTENT_TRACE_ITEMS))
+    evidence_chunks.extend(_candidate_text_list(candidate, "constraints", limit=MAX_CONSTRAINT_ITEMS))
+    evidence_chunks.extend(_candidate_text_list(candidate, "acceptance_criteria", limit=MAX_ACCEPTANCE_CRITERIA_ITEMS))
+    evidence_chunks.extend(str(item).strip() for item in candidate.get("representative_examples", []) if str(item).strip())
+    evidence_items = candidate.get("evidence_items")
+    if isinstance(evidence_items, list):
+        for item in evidence_items[:3]:
+            if not isinstance(item, dict):
+                continue
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                evidence_chunks.append(summary)
+    corpus = normalize_match_text(" ".join(evidence_chunks))
+    if not corpus:
+        return ""
+    if any(pattern_in_text(corpus, keyword) for keyword in required_keywords):
+        return ""
+    report_like_patterns = ("report", "draft", "lecture", "summary", "markdown", "レポート", "下書き", "講義")
+    if active_signals & {"run_tests", "tests-before-close", "review_changes", "findings-first", "file-line-refs"}:
+        if not (active_signals & {"prepare_report"}) and any(pattern_in_text(corpus, pattern) for pattern in report_like_patterns):
+            return "候補名と根拠の意味が十分に一致しないため"
+    return ""
 
 
 _CONFIDENCE_SORT_PRIORITY = {"strong": 0, "medium": 1, "weak": 2}
@@ -4415,6 +4469,7 @@ def build_proposal_sections(
         if isinstance(packet, dict):
             rejected.append(annotate_unclustered_packet(packet))
 
+    ready, needs_research, rejected = _dedupe_candidate_sections(ready, needs_research, rejected)
     ready.sort(key=_ready_candidate_sort_key)
 
     compact_ready_rows = build_compact_ready_rows(ready)
@@ -4694,10 +4749,6 @@ def build_proposal_markdown(
             lines.extend(rejected_item_lines(index, candidate))
     else:
         lines.append("なし")
-
-    if ready:
-        lines.append("")
-        lines.append("候補番号を入力すると /skill-creator による登録フローが始まります。選択後は handoff を正本扱いせず、適用先 repo の生ファイル確認から始めてください。選ばなかった候補は次回以降も引き続き提案されます。複数登録したい場合は 1 つずつ選択してください。")
     return "\n".join(lines)
 
 
@@ -4790,6 +4841,62 @@ _RULE_DISPLAY_LABELS: dict[str, str] = {
     "format-rule": "整形ルール",
 }
 
+_TASK_SHAPE_NOUN_LABELS: dict[str, str] = {
+    "prepare_report": "レポート下書き整理",
+    "write_markdown": "Markdown整理手順",
+    "debug_failure": "不具合調査手順",
+    "implement_feature": "実装フロー整理",
+    "run_tests": "テスト確認ルール",
+    "review_changes": "変更レビュー整理",
+    "search_code": "コード調査手順",
+    "inspect_files": "ファイル確認手順",
+    "summarize_findings": "指摘整理手順",
+    "edit_config": "設定更新ルール",
+}
+
+_ARTIFACT_HINT_NOUN_LABELS: dict[str, str] = {
+    "report": "レポート下書き整理",
+    "markdown": "Markdown整理手順",
+    "review": "レビュー整理手順",
+    "config": "設定更新ルール",
+    "code": "実装フロー整理",
+}
+
+_DISPLAY_LABEL_PATTERN_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("twitter/x", "bookmark", "search tags"), "検索タグ生成"),
+    (("twitter/x", "bookmark", "metadata"), "ブックマーク整理"),
+    (("bookmark", "search tags", "metadata"), "検索タグ生成"),
+    (("search tags", "metadata"), "検索タグ生成"),
+    (("image", "analyze"), "画像内容解析"),
+    (("image url", "analyze"), "画像内容解析"),
+    (("ocr",), "画像内容解析"),
+    (("findings", "severity"), "レビュー指摘整理"),
+    (("review", "line references"), "行番号付きレビュー"),
+    (("review", "file and line"), "行番号付きレビュー"),
+    (("daily", "report"), "日報下書き整理"),
+    (("weekly", "report"), "週次レポート整理"),
+    (("run tests",), "テスト確認ルール"),
+    (("pytest",), "テスト確認ルール"),
+)
+
+_DETAIL_SUMMARY_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("valid json",), "出力形式を JSON に固定する"),
+    (("return only", "json"), "出力形式を JSON に固定する"),
+    (("file and line",), "ファイル名と行番号を含める"),
+    (("line references",), "ファイル名と行番号を含める"),
+    (("findings", "severity"), "指摘を重要度順で整理する"),
+    (("search tags", "metadata"), "タグとメタデータの形式を揃える"),
+)
+
+_READY_ALIGNMENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("run_tests", ("test", "tests", "pytest", "lint", "build", "spec", "unit test", "テスト", "検証")),
+    ("tests-before-close", ("test", "tests", "pytest", "lint", "build", "テスト", "検証")),
+    ("review_changes", ("review", "findings", "severity", "line references", "diff", "レビュー", "指摘")),
+    ("findings-first", ("findings", "severity", "review", "レビュー", "指摘")),
+    ("file-line-refs", ("line references", "file and line", "行番号", "ファイル")),
+    ("prepare_report", ("report", "summary", "draft", "daily brief", "日報", "レポート", "下書き")),
+)
+
 _COMPACT_CONFIDENCE_LABELS: dict[str, str] = {
     "strong": "高い",
     "medium": "中程度",
@@ -4809,6 +4916,9 @@ def _display_label_for_candidate(candidate: dict[str, Any]) -> str:
     provided = str(candidate.get("display_label") or "").strip()
     if provided:
         return provided
+    heuristic = _heuristic_display_label(candidate)
+    if heuristic:
+        return heuristic
     label = str(candidate.get("label") or "").strip()
     if label:
         return summarize_text(label, 40)
@@ -4824,6 +4934,72 @@ def _display_label_for_candidate(candidate: dict[str, Any]) -> str:
             if summary:
                 return summarize_text(summary, 40)
     return "Unnamed candidate"
+
+
+def _candidate_support_total(candidate: dict[str, Any]) -> int:
+    support = candidate.get("support") if isinstance(candidate.get("support"), dict) else {}
+    try:
+        return int(support.get("total_packets", 0)) if support else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _candidate_display_corpus(candidate: dict[str, Any]) -> str:
+    chunks: list[str] = []
+    for key in ("label", "evidence_summary", "confidence_reason"):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            chunks.append(value)
+    chunks.extend(_candidate_text_list(candidate, "intent_trace", limit=MAX_INTENT_TRACE_ITEMS))
+    chunks.extend(_candidate_text_list(candidate, "constraints", limit=MAX_CONSTRAINT_ITEMS))
+    chunks.extend(_candidate_text_list(candidate, "acceptance_criteria", limit=MAX_ACCEPTANCE_CRITERIA_ITEMS))
+    chunks.extend(str(item).strip() for item in candidate.get("representative_examples", []) if str(item).strip())
+    evidence_items = candidate.get("evidence_items")
+    if isinstance(evidence_items, list):
+        for item in evidence_items[:3]:
+            if not isinstance(item, dict):
+                continue
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                chunks.append(summary)
+    chunks.extend(_candidate_task_shapes(candidate))
+    chunks.extend(_candidate_artifact_hints(candidate))
+    chunks.extend(_candidate_rule_hints(candidate))
+    return normalize_match_text(" ".join(chunks))
+
+
+def _heuristic_display_label(candidate: dict[str, Any]) -> str:
+    corpus = _candidate_display_corpus(candidate)
+    for patterns, label in _DISPLAY_LABEL_PATTERN_RULES:
+        if all(pattern_in_text(corpus, pattern) for pattern in patterns):
+            return label
+
+    for rule in _candidate_rule_hints(candidate):
+        mapped = _RULE_DISPLAY_LABELS.get(rule)
+        if mapped:
+            return mapped
+
+    task_shapes = _candidate_task_shapes(candidate)
+    artifact_hints = _candidate_artifact_hints(candidate)
+    if "prepare_report" in task_shapes and "report" in artifact_hints:
+        return "レポート下書き整理"
+    if "review_changes" in task_shapes and "review" in artifact_hints:
+        return "レビュー整理手順"
+
+    for shape in task_shapes:
+        mapped = _TASK_SHAPE_NOUN_LABELS.get(shape)
+        if mapped:
+            return mapped
+
+    for hint in artifact_hints:
+        mapped = _ARTIFACT_HINT_NOUN_LABELS.get(hint)
+        if mapped:
+            return mapped
+
+    label = str(candidate.get("label") or "").strip()
+    if label and len(label) <= 20 and not is_directive_like_user_message(label):
+        return label
+    return ""
 
 
 def _compact_focus_label(candidate: dict[str, Any]) -> str:
@@ -4933,6 +5109,145 @@ def build_compact_ready_markdown(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _candidate_identity_merge_key(candidate: dict[str, Any]) -> str:
+    kind = str(candidate.get("suggested_kind") or "").strip()
+    raw_label = normalized_directive_label(str(candidate.get("label") or ""))
+    display_label = normalized_directive_label(_display_label_for_candidate(candidate))
+    identity = raw_label or display_label or str(candidate.get("candidate_id") or candidate.get("packet_id") or "").strip()
+    scope_marker = ""
+    if kind == "skill":
+        handoff = candidate.get("skill_creator_handoff")
+        if isinstance(handoff, dict):
+            if handoff.get("cross_repo"):
+                scope_marker = "::scope:cross_repo"
+            else:
+                handoff_scope = str(handoff.get("handoff_scope") or "").strip()
+                if handoff_scope and handoff_scope != "current_repo":
+                    scope_marker = f"::scope:{handoff_scope}"
+    key = f"{kind}:{identity}" if kind else identity
+    return key + scope_marker
+
+
+def _candidate_rank(candidate: dict[str, Any]) -> tuple[int, int]:
+    conf = str(candidate.get("confidence") or "").strip()
+    return (_CONFIDENCE_SORT_PRIORITY.get(conf, 3), -_candidate_support_total(candidate))
+
+
+def _record_candidate_variant(primary: dict[str, Any], other: dict[str, Any], *, section_name: str) -> None:
+    variants = primary.setdefault("merged_variants", [])
+    if not isinstance(variants, list):
+        variants = []
+        primary["merged_variants"] = variants
+    candidate_id = str(other.get("candidate_id") or other.get("packet_id") or "").strip()
+    if candidate_id and any(isinstance(item, dict) and item.get("candidate_id") == candidate_id for item in variants):
+        return
+    variants.append(
+        {
+            "candidate_id": candidate_id,
+            "section": section_name,
+            "confidence": str(other.get("confidence") or "").strip(),
+            "observation_count": _candidate_support_total(other),
+        }
+    )
+
+
+def _merge_candidate_variants(primary: dict[str, Any], secondary: dict[str, Any]) -> None:
+    variants = secondary.get("merged_variants")
+    if not isinstance(variants, list):
+        return
+    for item in variants:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "").strip()
+        if not candidate_id:
+            continue
+        _record_candidate_variant(primary, {"candidate_id": candidate_id, "confidence": item.get("confidence"), "support": {"total_packets": item.get("observation_count", 0)}}, section_name=str(item.get("section") or ""))
+
+
+def _dedupe_candidate_sections(
+    ready: list[dict[str, Any]],
+    needs_research: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    outputs = {"ready": [], "needs_research": [], "rejected": []}
+    indexes: dict[tuple[str, str], int] = {}
+    primaries: dict[str, dict[str, Any]] = {}
+
+    for section_name, candidates in (("ready", ready), ("needs_research", needs_research), ("rejected", rejected)):
+        for candidate in candidates:
+            key = _candidate_identity_merge_key(candidate)
+            existing = primaries.get(key)
+            if existing is None:
+                outputs[section_name].append(candidate)
+                indexes[(section_name, key)] = len(outputs[section_name]) - 1
+                primaries[key] = candidate
+                continue
+
+            existing_section = next(name for name in ("ready", "needs_research", "rejected") if (name, key) in indexes)
+            if existing_section == section_name:
+                existing_index = indexes[(existing_section, key)]
+                existing_candidate = outputs[existing_section][existing_index]
+                if _candidate_rank(candidate) < _candidate_rank(existing_candidate):
+                    _record_candidate_variant(candidate, existing_candidate, section_name=section_name)
+                    _merge_candidate_variants(candidate, existing_candidate)
+                    outputs[existing_section][existing_index] = candidate
+                    primaries[key] = candidate
+                    continue
+                _record_candidate_variant(existing, candidate, section_name=section_name)
+                continue
+
+            _record_candidate_variant(existing, candidate, section_name=section_name)
+
+    return outputs["ready"], outputs["needs_research"], outputs["rejected"]
+
+
+def _summarize_candidate_detail(value: str) -> str:
+    collapsed = _collapse_whitespace(value)
+    if not collapsed:
+        return ""
+    normalized = normalize_match_text(collapsed)
+    for patterns, summary in _DETAIL_SUMMARY_RULES:
+        if all(pattern_in_text(normalized, pattern) for pattern in patterns):
+            return summary
+    if is_directive_like_user_message(collapsed) and len(collapsed) > 120:
+        return summarize_text(collapsed, 60)
+    return summarize_text(collapsed, 90)
+
+
+def _detail_lines(title: str, values: list[str]) -> list[str]:
+    summaries: list[str] = []
+    for value in values:
+        summary = _summarize_candidate_detail(value)
+        if not summary:
+            continue
+        if any(_token_overlap_ratio(summary, seen) >= 0.8 for seen in summaries):
+            continue
+        summaries.append(summary)
+        if len(summaries) >= 1:
+            break
+    if not summaries:
+        return []
+    return [f"   {title}: {summaries[0]}"]
+
+
+def _variant_summary_line(candidate: dict[str, Any]) -> str:
+    variants = candidate.get("merged_variants")
+    if not isinstance(variants, list) or not variants:
+        return ""
+    counts = sorted(
+        {
+            int(item.get("observation_count", 0))
+            for item in variants
+            if isinstance(item, dict) and int(item.get("observation_count", 0)) > 0
+        },
+        reverse=True,
+    )
+    suffix = ""
+    if counts:
+        suffix = "（観測 " + " / ".join(str(count) for count in counts[:3]) + " 回の variant を含む）"
+    return f"   関連候補: {len(variants)}件の近似候補を統合表示{suffix}"
+
+
 def proposal_item_lines(
     index: int,
     candidate: dict[str, Any],
@@ -4982,7 +5297,12 @@ def proposal_item_lines(
             if handoff_scope.get("cross_repo"):
                 lines.append("   適用先: 別リポジトリ（現在の CWD ではなく、handoff の target repo で /skill-creator）")
             elif str(handoff_scope.get("handoff_scope") or "") == "current_repo":
-                lines.append("   適用先: 現在のリポジトリ")
+                if str(handoff_scope.get("cross_repo_confidence") or "").strip() == "low":
+                    lines.append("   適用先: 要確認（現在のリポジトリとは断定しません）")
+                else:
+                    lines.append("   適用先: 現在のリポジトリ")
+            else:
+                lines.append("   適用先: 要確認（観測時 workspace からは断定しません）")
             res_note = str(handoff_scope.get("workspace_resolution_note") or "").strip()
             if res_note and len(res_note) <= 200:
                 lines.append(f"   workspace 注記: {res_note}")
@@ -5018,16 +5338,14 @@ def proposal_item_lines(
     if not include_classification and isinstance(total_packets, int) and total_packets > 0:
         source_label = f"{source_count}ソース" if source_count > 0 else "source 不明"
         lines.append(f"   出現: {total_packets}回 / {source_label}")
+    variant_line = _variant_summary_line(candidate)
+    if variant_line:
+        lines.append(variant_line)
     lines.extend(build_evidence_chain_lines(candidate))
     constraints = _candidate_text_list(candidate, "constraints", limit=MAX_CONSTRAINT_ITEMS)
     acceptance_criteria = _candidate_text_list(candidate, "acceptance_criteria", limit=MAX_ACCEPTANCE_CRITERIA_ITEMS)
-    intent_trace = _candidate_text_list(candidate, "intent_trace", limit=MAX_INTENT_TRACE_ITEMS)
-    if intent_trace:
-        lines.append(f"   意図トレース: {' / '.join(intent_trace[:2])}")
-    if constraints:
-        lines.append(f"   制約: {' / '.join(constraints[:2])}")
-    if acceptance_criteria:
-        lines.append(f"   受け入れ条件: {' / '.join(acceptance_criteria[:2])}")
+    lines.extend(_detail_lines("制約", constraints))
+    lines.extend(_detail_lines("受け入れ条件", acceptance_criteria))
     contamination_signals = [str(item).strip() for item in candidate.get("contamination_signals", []) if str(item).strip()]
     origin_hint = str(candidate.get("origin_hint") or "").strip()
     user_signal_strength = str(candidate.get("user_signal_strength") or "").strip()

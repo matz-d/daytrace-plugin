@@ -156,6 +156,8 @@ Validation policy:
 - `timeline`: merged event list sorted by timestamp
 - `groups`: nearby events grouped with `evidence` and aggregated `confidence` (see Group Contract below)
 - `summary`: source status counts, total event count, total group count, and `no_sources_available`
+- `report_date_context`: explains that `report_date` uses the local machine timezone and the 06:00 report-day boundary
+- `scope_mode`: top-level scope summary for downstream formatters (`single` or `mixed`)
 
 Each entry in `sources[]` includes:
 
@@ -164,6 +166,12 @@ Each entry in `sources[]` includes:
 - `scope`: copied from `sources.json.scope_mode` so downstream skills can tell whether that source represents `all-day` or `workspace` evidence
 - `events_count`: normalized event count
 - optional `reason`, `message`, `command`, `duration_sec`
+
+Terminology note:
+
+- `sources[].scope` = source-level scope label copied from registry `scope_mode`
+- `groups[].scope_breakdown` / `groups[].mixed_scope` = group-level result after aggregating multiple source scopes
+- top-level `scope_mode` = payload-level summary intended for downstream rendering (`single` or `mixed`)
 
 ### Group Contract
 
@@ -248,6 +256,11 @@ Important fields:
 - `summary`: packet counts, candidate counts, and blocking stats only
 - `candidates[].session_refs`: stable references for detail lookup
 - `candidates[].support`: packet counts and ranking evidence
+
+Terminology note:
+
+- `config.observation_mode` is the skill-miner observation filter mode, not the same concept as aggregate/projection `scope_mode`
+- `workspace` means repo-local filtering, while `all-sessions` keeps the same day window but removes workspace filtering
 - `candidates[].confidence`, `proposal_ready`, `triage_status`: proposal quality and triage outcome
 - `candidates[].quality_flags`, `evidence_summary`: why a candidate is strong, weak, or held back
 - `candidates[].evidence_items`: up to 3 proposal-ready evidence entries with `session_ref`, `timestamp`, `source`, `summary`
