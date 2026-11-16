@@ -6,7 +6,7 @@ import shlex
 import subprocess
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -47,21 +47,6 @@ SHARE_SENSITIVE_BROWSER_HOSTS = {
 SHARE_SENSITIVE_BROWSER_HOST_SUFFIXES = ("auth0.com",)
 
 
-def report_day_for_local_time(now: datetime) -> date:
-    """Calendar day used for daily-report output dirs and --date today/yesterday.
-
-    Before 06:00 wall clock in ``now``'s timezone, counts as the previous calendar day
-    (late-night session). When ``resolve_date_filters`` is called without ``now``, uses
-    ``datetime.now().astimezone()`` so the machine's local offset applies.
-    """
-    if now.tzinfo is None:
-        now = datetime.now().astimezone()
-    cal_date = now.date()
-    if now.hour < 6:
-        return cal_date - timedelta(days=1)
-    return cal_date
-
-
 def resolve_date_filters(
     date_arg: str | None,
     since: str | None,
@@ -74,13 +59,15 @@ def resolve_date_filters(
     if not date_arg:
         return since, until
 
+    # A day is the local calendar day (00:00-23:59) everywhere: --date, the
+    # collection range, and the stored requested_date.
     lowered = date_arg.strip().lower()
     anchor = now or datetime.now().astimezone()
-    report_day = report_day_for_local_time(anchor)
+    today = anchor.astimezone().date() if anchor.tzinfo else anchor.date()
     if lowered == "today":
-        target = report_day
+        target = today
     elif lowered == "yesterday":
-        target = report_day - timedelta(days=1)
+        target = today - timedelta(days=1)
     else:
         target = parse_datetime(date_arg, bound="start").date()
     iso_day = target.isoformat()
@@ -141,7 +128,10 @@ def normalize_event(event: dict[str, Any], source_name: str) -> dict[str, Any] |
         if missing:
             return None
 
-    timestamp = ensure_datetime(normalized.get("timestamp"))
+    try:
+        timestamp = ensure_datetime(normalized.get("timestamp"))
+    except (TypeError, ValueError):
+        return None
     if timestamp is None:
         return None
     normalized["timestamp"] = timestamp.isoformat()
@@ -170,12 +160,17 @@ def normalize_source_payload(
     command: list[str],
     duration_sec: float,
 ) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return error_result(source, "Source returned JSON that is not an object", command, duration_sec)
     status = payload.get("status")
     if status not in {"success", "skipped", "error"}:
         return error_result(source, "Source returned an unknown status", command, duration_sec)
+    raw_events = payload.get("events", [])
+    if not isinstance(raw_events, list):
+        return error_result(source, "Source returned events that are not a list", command, duration_sec)
 
     normalized_events = []
-    for raw_event in payload.get("events", []):
+    for raw_event in raw_events:
         event = normalize_event(raw_event, source["name"])
         if event:
             normalized_events.append(event)
@@ -241,7 +236,11 @@ def run_source(
     except json.JSONDecodeError:
         return error_result(source, "Source returned invalid JSON", command, duration)
 
-    normalized = normalize_source_payload(source, payload, command=command, duration_sec=duration)
+    # One broken source must not fail the whole collection.
+    try:
+        normalized = normalize_source_payload(source, payload, command=command, duration_sec=duration)
+    except Exception as exc:
+        return error_result(source, f"Source output could not be read: {exc}", command, duration)
     if completed.returncode != 0 and normalized["status"] == "success":
         normalized["status"] = "error"
         normalized["message"] = completed.stderr.strip() or "Source exited with a non-zero status"
@@ -521,10 +520,13 @@ def _event_context_tokens(event: dict[str, Any]) -> set[str]:
     details = event.get("details", {})
     if not isinstance(details, dict):
         return tokens
-    ai_observation = details.get("ai_observation") or details.get("skill_miner_packet")
-    if isinstance(ai_observation, dict):
-        tokens |= _context_tokens_from_text(str(ai_observation.get("primary_intent") or ""))
-        for item in ai_observation.get("referenced_files", [])[:5]:
+    # Claude / Codex events: the first request excerpt and the files the session touched.
+    user_highlights = details.get("user_highlights")
+    if isinstance(user_highlights, list) and user_highlights:
+        tokens |= _context_tokens_from_text(str(user_highlights[0]))
+    referenced_files = details.get("referenced_files")
+    if isinstance(referenced_files, list):
+        for item in referenced_files[:5]:
             tokens |= _context_tokens_from_text(str(item))
     changed_files = details.get("changed_files")
     if isinstance(changed_files, list):
@@ -542,7 +544,7 @@ def _event_has_rich_context(event: dict[str, Any]) -> bool:
     details = event.get("details", {})
     if not isinstance(details, dict):
         return False
-    if isinstance(details.get("ai_observation") or details.get("skill_miner_packet"), dict):
+    if details.get("referenced_files") or details.get("user_highlights"):
         return True
     if isinstance(details.get("changed_files"), list) and details.get("changed_files"):
         return True

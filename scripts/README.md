@@ -11,7 +11,7 @@
 | `store.py` / `derived_store.py` | SQLite store の書き込み / 読み出し |
 | `request_text.py` | 依頼文から、ツールが差し込んだ文（system-reminder、引き継ぎ要約など）を除く |
 | `common.py` | 共有ユーティリティ（JSON I/O, 日時, エラー処理） |
-| `skill_miner_common.py` | Claude / Codex の会話をまとまりに分ける共有部品（旧パターン提案から引き継ぎ。収集が使う部分だけ残す予定） |
+| `session_packets.py` | Claude / Codex の会話を作業のまとまり（logical packet）に分け、抜粋とツール呼び出しを整える |
 | `git_history.py` | Git commit 履歴の source CLI |
 | `claude_history.py` | Claude 会話履歴の source CLI。`session_summary` の `details.user_requests[]` に依頼文を残す |
 | `codex_history.py` | Codex 会話履歴の source CLI。`session_meta` の `details.turns[]` に依頼文・きっかけ・開始/終了を残す |
@@ -128,7 +128,7 @@ Timestamps in `observations.occurred_at` are fixed-width UTC (`YYYY-MM-DDTHH:MM:
 ## Shared CLI conventions
 
 - `--since` and `--until` accept ISO 8601 datetime or `YYYY-MM-DD`
-- `--date` accepts `today`, `yesterday`, or `YYYY-MM-DD` as a shorthand for single-day aggregation
+- `--date` accepts `today`, `yesterday`, or `YYYY-MM-DD` as a shorthand for single-day aggregation. A day is the local calendar day (00:00-23:59); there is no 06:00 boundary
 - `--group-window` overrides the default 15 minute grouping window
 - `--workspace` defaults to the current working directory where relevant
 - `--all-sessions` disables workspace filtering for Claude/Codex history
@@ -145,8 +145,6 @@ Timestamps in `observations.occurred_at` are fixed-width UTC (`YYYY-MM-DDTHH:MM:
 - `timeline`: merged event list sorted by timestamp
 - `groups`: nearby events grouped with `evidence` and aggregated `confidence` (see Group Contract below)
 - `summary`: source status counts, total event count, total group count, and `no_sources_available`
-- `report_date_context`: explains that `report_date` uses the local machine timezone and the 06:00 report-day boundary
-- `scope_mode`: top-level scope summary for downstream formatters (`single` or `mixed`)
 
 Each entry in `sources[]` includes:
 
@@ -160,7 +158,6 @@ Terminology note:
 
 - `sources[].scope` = source-level scope label copied from registry `scope_mode`
 - `groups[].scope_breakdown` / `groups[].mixed_scope` = group-level result after aggregating multiple source scopes
-- top-level `scope_mode` = payload-level summary intended for downstream rendering (`single` or `mixed`)
 
 ### Group Contract
 

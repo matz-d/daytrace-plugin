@@ -20,17 +20,14 @@ from common import (
     summarize_text,
     within_range,
 )
-from skill_miner_common import (
+from session_packets import (
     ASSISTANT_HIGHLIGHT_LIMIT,
     DEFAULT_GAP_HOURS,
     MAX_ASSISTANT_HIGHLIGHTS,
     MAX_USER_HIGHLIGHTS,
     USER_HIGHLIGHT_LIMIT,
     build_claude_logical_packets,
-    build_claude_session_ref,
-    build_packet,
     claude_message_is_tool_result_only,
-    claude_message_text,
     head_tail_excerpts,
 )
 from request_text import clean_request_text
@@ -167,9 +164,6 @@ def main() -> None:
             group = empty_group(path)
             user_requests = collect_user_requests(filtered_records, workspace)
             serialized_packets: list[dict[str, object]] = []
-            aggregated_user_messages: list[str] = []
-            aggregated_assistant_messages: list[str] = []
-            aggregated_tools: list[str] = []
             aggregated_tool_calls: list[dict[str, object]] = []
             aggregated_referenced_files: list[str] = []
             for packet_index, logical_packet in enumerate(matched_packets):
@@ -180,9 +174,6 @@ def main() -> None:
                 group["message_count"] = int(group["message_count"]) + int(logical_packet.get("message_count") or 0)
                 group["user_count"] = int(group["user_count"]) + int(logical_packet.get("user_message_count") or 0)
                 group["assistant_count"] = int(group["assistant_count"]) + int(logical_packet.get("assistant_message_count") or 0)
-                aggregated_user_messages.extend([str(message) for message in logical_packet.get("user_messages", [])])
-                aggregated_assistant_messages.extend([str(message) for message in logical_packet.get("assistant_messages", [])])
-                aggregated_tools.extend([str(tool) for tool in logical_packet.get("tools", [])])
                 aggregated_tool_calls.extend([detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)])
                 aggregated_referenced_files.extend(
                     [str(value) for value in logical_packet.get("referenced_files", []) if str(value or "").strip()]
@@ -205,20 +196,6 @@ def main() -> None:
 
                 assistant_summary = assistant_excerpts[-1] if assistant_excerpts else None
                 packet_start = logical_packet.get("started_at")
-                skill_miner_packet = build_packet(
-                    packet_id=f"claude:{path.parent.name}:{path.stem}:{packet_index:03d}",
-                    source=SOURCE_NAME,
-                    session_ref=build_claude_session_ref(str(path), packet_start),
-                    session_id=logical_packet.get("session_id"),
-                    workspace=logical_packet.get("cwd"),
-                    timestamp=packet_start,
-                    user_messages=[str(message) for message in logical_packet.get("user_messages", [])],
-                    assistant_messages=[str(message) for message in logical_packet.get("assistant_messages", [])],
-                    tools=[str(tool) for tool in logical_packet.get("tools", [])],
-                    tool_call_details=[detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)],
-                    referenced_files=logical_packet.get("referenced_files", []),
-                    is_sidechain=bool(logical_packet.get("is_sidechain")),
-                )
                 serialized_packets.append(
                     {
                         "packet_index": packet_index,
@@ -235,8 +212,7 @@ def main() -> None:
                         "assistant_summary": assistant_summary,
                         "tool_signals": list(logical_packet.get("tools", [])),
                         "tool_call_details": [detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)],
-                        "ai_observation": skill_miner_packet,
-                        "skill_miner_packet": skill_miner_packet,
+                        "referenced_files": list(logical_packet.get("referenced_files", [])),
                     }
                 )
 
@@ -244,25 +220,7 @@ def main() -> None:
             if not timestamps:
                 continue
 
-            ai_observation_packets = [
-                packet["skill_miner_packet"]
-                for packet in serialized_packets
-                if isinstance(packet.get("skill_miner_packet"), dict)
-            ]
-            merged_ai_observation = build_packet(
-                packet_id=f"claude:{path.parent.name}:{path.stem}:summary",
-                source=SOURCE_NAME,
-                session_ref=build_claude_session_ref(str(path), timestamps[0]),
-                session_id=str(group["session_id"] or "") or None,
-                workspace=str(group["cwd"] or "") or None,
-                timestamp=timestamps[0],
-                user_messages=aggregated_user_messages or [str(excerpt) for excerpt in group["user_excerpts"]],
-                assistant_messages=aggregated_assistant_messages or [str(excerpt) for excerpt in group["assistant_excerpts"]],
-                tools=aggregated_tools,
-                tool_call_details=[dict(detail) for detail in aggregated_tool_calls],
-                referenced_files=list(dict.fromkeys(aggregated_referenced_files))[:20],
-                is_sidechain=bool(group["is_sidechain"]),
-            )
+            referenced_files = list(dict.fromkeys(aggregated_referenced_files))[:20]
             first_user = group["user_excerpts"][0] if group["user_excerpts"] else "No user prompt captured"
             summary = f"Claude session: {summarize_text(first_user, 96)}"
             details = {
@@ -279,8 +237,7 @@ def main() -> None:
                 "user_requests": user_requests,
                 "logical_packets": serialized_packets,
                 "logical_packet_count": len(serialized_packets),
-                "ai_observation": merged_ai_observation,
-                "ai_observation_packets": ai_observation_packets,
+                "referenced_files": referenced_files,
             }
             if group["assistant_excerpts"]:
                 details["assistant_summary"] = group["assistant_excerpts"][-1]
@@ -309,8 +266,6 @@ def main() -> None:
                             "user_highlights": group["user_excerpts"],
                             "assistant_highlights": group["assistant_excerpts"],
                             "assistant_summary": group["assistant_excerpts"][-1] if group["assistant_excerpts"] else None,
-                            "ai_observation": merged_ai_observation,
-                            "ai_observation_packets": ai_observation_packets,
                         },
                         "confidence": "medium",
                     }
@@ -343,8 +298,6 @@ def main() -> None:
                             "tools": [{"name": name, "count": count} for name, count in tool_counter.most_common()],
                             "total_calls": sum(tool_counter.values()),
                             "tool_call_details": aggregated_tool_calls[:8],
-                            "ai_observation": merged_ai_observation,
-                            "ai_observation_packets": ai_observation_packets,
                         },
                         "confidence": "high",
                     }

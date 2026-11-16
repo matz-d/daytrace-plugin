@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Collect today's logs into the DayTrace store. Meant to run unattended (launchd / cron).
 
-Runs `aggregate.py --date today`. When yesterday has no stored file-activity run
-(the Mac was asleep or off at the scheduled time), it collects yesterday first.
-Yesterday is not re-collected once stored: untracked-file activity is a snapshot,
-and a later run would lose files that were committed in between.
+Runs `aggregate.py --date today`. A day is the local calendar day (00:00-23:59).
+Yesterday is collected again until it has a file-activity run taken after the day
+ended, so work after the evening run (or a day the Mac slept through) is not lost.
+Once yesterday has such a run it is left alone: untracked-file activity is a
+snapshot, and a later run would lose files that were committed in between.
 """
 
 from __future__ import annotations
@@ -13,11 +14,10 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-from aggregate_core import report_day_for_local_time
-from common import emit, resolve_workspace
+from common import emit, ensure_datetime, resolve_workspace
 from derived_store import get_source_runs
 from store import resolve_store_path
 
@@ -34,15 +34,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def has_stored_snapshot(store_path: Path, workspace: Path, day: str) -> bool:
+def has_complete_snapshot(store_path: Path, workspace: Path, day: date) -> bool:
+    """True when `day` has a successful file-activity run collected after the day ended."""
+    day_end = datetime.combine(day + timedelta(days=1), time.min).astimezone()
     runs = get_source_runs(
         store_path,
         workspace=workspace,
-        requested_date=day,
+        requested_date=day.isoformat(),
         all_sessions=True,
         source_names=[SNAPSHOT_SOURCE],
     )
-    return any(run.get("status") == "success" for run in runs)
+    return any(
+        run.get("status") == "success" and ensure_datetime(run.get("collected_at")) >= day_end
+        for run in runs
+    )
+
+
+def days_to_collect(store_path: Path, workspace: Path, now: datetime) -> list[str]:
+    today = now.astimezone().date()
+    yesterday = today - timedelta(days=1)
+    days = [today.isoformat()]
+    if not has_complete_snapshot(store_path, workspace, yesterday):
+        days.insert(0, yesterday.isoformat())
+    return days
 
 
 def collect(day: str, *, workspace: Path, store_path: Path, timeout: int, sources_file: str | None = None) -> dict[str, object]:
@@ -59,7 +73,10 @@ def collect(day: str, *, workspace: Path, store_path: Path, timeout: int, source
     ]
     if sources_file:
         command.extend(["--sources-file", sources_file])
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=str(workspace))
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=str(workspace))
+    except subprocess.TimeoutExpired:
+        return {"date": day, "status": "error", "message": f"aggregate.py did not finish within {timeout} seconds"}
     if completed.returncode != 0:
         return {"date": day, "status": "error", "message": completed.stderr.strip()[-2000:]}
     try:
@@ -90,12 +107,7 @@ def main() -> None:
     args = build_parser().parse_args()
     workspace = resolve_workspace(args.workspace)
     store_path = resolve_store_path(args.store_path)
-    today = report_day_for_local_time(datetime.now().astimezone())
-    yesterday = (today - timedelta(days=1)).isoformat()
-
-    days = [today.isoformat()]
-    if not has_stored_snapshot(store_path, workspace, yesterday):
-        days.insert(0, yesterday)
+    days = days_to_collect(store_path, workspace, datetime.now().astimezone())
 
     results = [
         collect(day, workspace=workspace, store_path=store_path, timeout=args.timeout, sources_file=args.sources_file)

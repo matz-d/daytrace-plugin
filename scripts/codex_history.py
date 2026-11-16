@@ -11,7 +11,6 @@ from common import (
     apply_limit,
     emit,
     error_response,
-    extract_text,
     is_within_path,
     parse_datetime,
     resolve_workspace,
@@ -20,15 +19,13 @@ from common import (
     summarize_text,
     within_range,
 )
-from skill_miner_common import (
+from session_packets import (
     ASSISTANT_HIGHLIGHT_LIMIT,
     DEFAULT_GAP_HOURS,
     MAX_ASSISTANT_HIGHLIGHTS,
     MAX_USER_HIGHLIGHTS,
     USER_HIGHLIGHT_LIMIT,
     build_codex_logical_packets,
-    build_codex_session_ref,
-    build_packet,
     codex_user_message_text,
     earliest_iso_timestamp,
     head_tail_excerpts,
@@ -203,11 +200,16 @@ def main() -> None:
         start = parse_datetime(args.since, bound="start")
         end = parse_datetime(args.until, bound="end")
 
-        if not history_file.exists() or not sessions_root.exists():
+        if not sessions_root.exists():
             emit(skipped_response(SOURCE_NAME, "not_found", history_file=str(history_file), sessions_root=str(sessions_root)))
             return
 
-        full_history_index, filtered_history_index = load_history_indexes(history_file, start, end)
+        # history.jsonl is optional: Codex stopped updating it in 2026-11, and the
+        # rollout files under sessions/ hold every request.
+        if history_file.exists():
+            full_history_index, filtered_history_index = load_history_indexes(history_file, start, end)
+        else:
+            full_history_index, filtered_history_index = {}, {}
         rollout_files = sorted(sessions_root.glob("**/rollout-*.jsonl"))
         if not rollout_files:
             emit(skipped_response(SOURCE_NAME, "not_found", history_file=str(history_file), sessions_root=str(sessions_root)))
@@ -281,9 +283,6 @@ def main() -> None:
                 continue
 
             serialized_packets: list[dict[str, object]] = []
-            aggregated_user_messages: list[str] = []
-            aggregated_assistant_messages: list[str] = []
-            aggregated_tool_names: list[str] = []
             aggregated_tool_calls: list[dict[str, object]] = []
             group_timestamps: list[str] = []
             assistant_excerpts: list[str] = []
@@ -296,11 +295,8 @@ def main() -> None:
                 group_timestamps.extend(packet_timestamps)
                 packet_user_messages = [str(message) for message in logical_packet.get("user_messages", [])]
                 packet_assistant_messages = [str(message) for message in logical_packet.get("assistant_messages", [])]
-                aggregated_user_messages.extend(packet_user_messages)
-                aggregated_assistant_messages.extend(packet_assistant_messages)
                 packet_tool_names = [str(tool) for tool in logical_packet.get("tools", []) if str(tool or "").strip()]
                 packet_tool_calls = [detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)]
-                aggregated_tool_names.extend(packet_tool_names)
                 aggregated_tool_calls.extend([dict(detail) for detail in packet_tool_calls])
 
                 user_excerpts = head_tail_excerpts(
@@ -333,19 +329,6 @@ def main() -> None:
                                 packet_timestamps[-1],
                             )
                         )
-                skill_miner_packet = build_packet(
-                    packet_id=f"codex:{session_id}:{packet_index:03d}",
-                    source=SOURCE_NAME,
-                    session_ref=build_codex_session_ref(session_id, logical_packet.get("started_at")),
-                    session_id=session_id,
-                    workspace=session_workspace,
-                    timestamp=logical_packet.get("started_at"),
-                    user_messages=packet_user_messages,
-                    assistant_messages=packet_assistant_messages,
-                    tools=packet_tool_names,
-                    tool_call_details=[dict(detail) for detail in packet_tool_calls],
-                    referenced_files=logical_packet.get("referenced_files", []),
-                )
                 serialized_packets.append(
                     {
                         "packet_index": packet_index,
@@ -361,8 +344,7 @@ def main() -> None:
                         "assistant_summary": assistant_packet_excerpts[-1] if assistant_packet_excerpts else None,
                         "tool_signals": packet_tool_names,
                         "tool_call_details": [dict(detail) for detail in packet_tool_calls],
-                        "ai_observation": skill_miner_packet,
-                        "skill_miner_packet": skill_miner_packet,
+                        "referenced_files": list(logical_packet.get("referenced_files", [])),
                     }
                 )
                 for detail in packet_tool_calls:
@@ -384,34 +366,15 @@ def main() -> None:
             for excerpt in event_user_excerpts:
                 if excerpt not in merged_user_excerpts and len(merged_user_excerpts) < MAX_USER_HIGHLIGHTS:
                     merged_user_excerpts.append(excerpt)
-            merged_user_messages = [str(message) for message in history_entry.get("user_messages", []) if str(message or "").strip()]
-            for message in aggregated_user_messages:
-                if message and message not in merged_user_messages:
-                    merged_user_messages.append(message)
             user_excerpt = merged_user_excerpts[0] if merged_user_excerpts else "No user prompt captured"
-            start_timestamp = (
-                packet_window_start
-                or (earliest_iso_timestamp([meta_details.get("timestamp")]) if not bounded else None)
-                or (earliest_iso_timestamp(history_entry.get("timestamps", [])) if not bounded else None)
-                or None
-            )
-            merged_skill_miner_packet = build_packet(
-                packet_id=f"codex:{session_id}:summary",
-                source=SOURCE_NAME,
-                session_ref=build_codex_session_ref(session_id, start_timestamp),
-                session_id=session_id,
-                workspace=session_workspace,
-                timestamp=start_timestamp,
-                user_messages=merged_user_messages,
-                assistant_messages=aggregated_assistant_messages,
-                tools=aggregated_tool_names,
-                tool_call_details=[dict(detail) for detail in aggregated_tool_calls],
-            )
-            ai_observation_packets = [
-                packet["skill_miner_packet"]
-                for packet in serialized_packets
-                if isinstance(packet.get("skill_miner_packet"), dict)
-            ]
+            referenced_files = list(
+                dict.fromkeys(
+                    str(path)
+                    for packet in serialized_packets
+                    for path in packet.get("referenced_files", [])
+                    if str(path or "").strip()
+                )
+            )[:20]
 
             session_summary = f"Codex session in {meta_details.get('cwd', 'unknown workspace')}"
             if within_range(session_timestamp, start, end) or (start is None and end is None):
@@ -433,9 +396,7 @@ def main() -> None:
                             "logical_packet_count": len(serialized_packets),
                             "user_highlights": merged_user_excerpts,
                             "assistant_highlights": assistant_excerpts,
-                            "ai_observation": merged_skill_miner_packet,
-                            "ai_observation_packets": ai_observation_packets,
-                            "skill_miner_packet": merged_skill_miner_packet,
+                            "referenced_files": referenced_files,
                         },
                         "confidence": "medium",
                     }
@@ -452,11 +413,7 @@ def main() -> None:
                             "cwd": meta_details.get("cwd"),
                             "user_highlights": merged_user_excerpts,
                             "assistant_highlights": assistant_excerpts,
-                            "logical_packets": serialized_packets,
-                            "logical_packet_count": len(serialized_packets),
-                            "ai_observation": merged_skill_miner_packet,
-                            "ai_observation_packets": ai_observation_packets,
-                            "skill_miner_packet": merged_skill_miner_packet,
+                            "referenced_files": referenced_files,
                         },
                         "confidence": "medium",
                     }
@@ -476,11 +433,6 @@ def main() -> None:
                             "tools": [{"name": name, "count": count} for name, count in tool_counter.most_common()],
                             "total_calls": sum(tool_counter.values()),
                             "tool_call_details": aggregated_tool_calls[:8],
-                            "logical_packets": serialized_packets,
-                            "logical_packet_count": len(serialized_packets),
-                            "ai_observation": merged_skill_miner_packet,
-                            "ai_observation_packets": ai_observation_packets,
-                            "skill_miner_packet": merged_skill_miner_packet,
                         },
                         "confidence": "high",
                     }

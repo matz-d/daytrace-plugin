@@ -1,7 +1,7 @@
 {
   "name": "daytrace",
   "description": "Claude Code / Codex の会話ログと Git・ファイル変更を、ローカルの SQLite に毎日ためる収集プラグイン。依頼文と作業時間を時系列で読み出せる。外部通信ゼロ・Python stdlib のみ。",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "matz-d"
   },

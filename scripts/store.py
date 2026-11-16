@@ -13,9 +13,8 @@ from typing import Any, Generator
 from common import isoformat_or_now, to_storage_timestamp
 from source_registry import normalize_confidence_categories
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DEFAULT_STORE_PATH = Path("~/.daytrace/daytrace.sqlite3").expanduser()
-AI_HISTORY_SOURCES = {"claude-history", "codex-history"}
 
 
 def resolve_store_path(store_path: str | Path | None) -> Path:
@@ -193,10 +192,50 @@ def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
     _create_base_schema(connection)
 
 
+# Keys that only fed the removed pattern-proposal feature. v5 stops writing them.
+LEGACY_PACKET_KEYS = frozenset({"ai_observation", "ai_observation_packets", "skill_miner_packet"})
+
+
+def _strip_legacy_packet_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _strip_legacy_packet_keys(item) for key, item in value.items() if key not in LEGACY_PACKET_KEYS}
+    if isinstance(value, list):
+        return [_strip_legacy_packet_keys(item) for item in value]
+    return value
+
+
+def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
+    # Drop the legacy pattern-proposal data: the packet rows and the packet keys
+    # inside AI-history events. Fingerprints are recomputed from the slimmer event.
+    connection.execute("DELETE FROM observations WHERE observation_kind = 'packet'")
+    rows = connection.execute(
+        "SELECT id, event_json FROM observations WHERE source_name IN ('claude-history', 'codex-history')"
+    ).fetchall()
+    for row in rows:
+        try:
+            event = json.loads(row["event_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("details"), dict):
+            continue
+        slim = _strip_legacy_packet_keys(event)
+        if slim == event:
+            continue
+        try:
+            connection.execute(
+                "UPDATE observations SET event_fingerprint = ?, details_json = ?, event_json = ? WHERE id = ?",
+                (compute_observation_fingerprint(slim), canonical_json(slim["details"]), canonical_json(slim), row["id"]),
+            )
+        except sqlite3.IntegrityError:
+            # The slim event already exists in the same run: keep that one.
+            connection.execute("DELETE FROM observations WHERE id = ?", (row["id"],))
+    _create_base_schema(connection)
+
+
 def bootstrap_store(path: Path) -> None:
     with connect_store(path) as connection:
         current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if current_version not in {0, 1, 2, 3, SCHEMA_VERSION}:
+        if current_version not in {0, 1, 2, 3, 4, SCHEMA_VERSION}:
             raise ValueError(f"Unsupported store schema version: {current_version}")
         if current_version == 1:
             _migrate_v1_to_v2(connection)
@@ -204,74 +243,15 @@ def bootstrap_store(path: Path) -> None:
             _migrate_v2_to_v3(connection)
         if current_version in {1, 2, 3}:
             _migrate_v3_to_v4(connection)
+        if current_version in {1, 2, 3, 4}:
+            _migrate_v4_to_v5(connection)
         if current_version in {0, SCHEMA_VERSION}:
             _create_base_schema(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-
-
-def _packet_summary(packet: dict[str, Any]) -> str:
-    for key in ("primary_intent", "full_user_intent", "packet_id", "session_ref"):
-        value = str(packet.get(key) or "").strip()
-        if value:
-            return value
-    return "AI packet"
-
-
-def _packet_observation_events(event: dict[str, Any]) -> list[dict[str, Any]]:
-    source_name = str(event.get("source") or "").strip()
-    if source_name not in AI_HISTORY_SOURCES:
-        return []
-    details = event.get("details")
-    if not isinstance(details, dict):
-        return []
-
-    candidates: list[dict[str, Any]] = []
-
-    def append_packet(value: Any) -> None:
-        if isinstance(value, dict):
-            candidates.append(value)
-
-    ai_observation_packets = details.get("ai_observation_packets")
-    has_packet_list = False
-    if isinstance(ai_observation_packets, list):
-        has_packet_list = True
-        for item in ai_observation_packets:
-            append_packet(item)
-
-    logical_packets = details.get("logical_packets")
-    if isinstance(logical_packets, list):
-        has_packet_list = True
-        for logical_packet in logical_packets:
-            if not isinstance(logical_packet, dict):
-                continue
-            append_packet(logical_packet.get("skill_miner_packet"))
-            append_packet(logical_packet.get("ai_observation"))
-
-    if source_name == "claude-history":
-        pass
-    elif not has_packet_list:
-        append_packet(details.get("skill_miner_packet"))
-        append_packet(details.get("ai_observation"))
-
-    packet_events: list[dict[str, Any]] = []
-    seen_packet_ids: set[str] = set()
-    for packet in candidates:
-        timestamp = str(packet.get("timestamp") or "").strip()
-        packet_id = str(packet.get("packet_id") or stable_hash(packet))
-        if not timestamp or packet_id in seen_packet_ids:
-            continue
-        seen_packet_ids.add(packet_id)
-        packet_events.append(
-            {
-                "source": source_name,
-                "timestamp": timestamp,
-                "type": "skill_miner_packet",
-                "summary": _packet_summary(packet),
-                "details": dict(packet),
-                "confidence": "medium",
-            }
-        )
-    return packet_events
+        connection.commit()
+        if current_version in {1, 2, 3, 4}:
+            # Give the space freed by the migration back to the file system.
+            connection.execute("VACUUM")
 
 
 def _upsert_source_run(
@@ -428,8 +408,6 @@ def _replace_observations(
 
     for event in result.get("events", []):
         insert_event(event, observation_kind="event")
-        for packet_event in _packet_observation_events(event):
-            insert_event(packet_event, observation_kind="packet")
 
 
 def _persist_source_result(
