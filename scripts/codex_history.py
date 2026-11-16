@@ -189,6 +189,217 @@ def extract_codex_turns(records: list[dict[str, object]], start, end) -> list[di
     return result
 
 
+def map_rollouts_by_session(rollout_files: list[Path]) -> dict[str, Path]:
+    mapped: dict[str, Path] = {}
+    for rollout in rollout_files:
+        meta = session_meta_from_rollout(rollout)
+        if meta and meta.get("id"):
+            mapped[str(meta["id"])] = rollout
+    return mapped
+
+
+def read_rollout(rollout: Path, workspace: Path | None) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+    """Session metadata and records of one rollout. Metadata is None when the session is outside `workspace`."""
+    meta_details: dict[str, object] | None = None
+    records: list[dict[str, object]] = []
+    with rollout.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            records.append(record)
+            if record.get("type") == "session_meta":
+                payload = record.get("payload", {})
+                if workspace and not is_within_path(payload.get("cwd"), workspace):
+                    return None, records
+                meta_details = payload
+    return meta_details, records
+
+
+def last_tool_timestamp(tool_calls: list[dict[str, object]], fallback: str) -> str:
+    return next(
+        (str(detail.get("timestamp")) for detail in reversed(tool_calls) if str(detail.get("timestamp") or "").strip()),
+        fallback,
+    )
+
+
+def summarize_packets(
+    scoped_packets: list[tuple[int, dict[str, object]]],
+    *,
+    session_id: str,
+    session_workspace: str | None,
+) -> dict[str, object]:
+    """Serialize the in-range logical packets of one session and collect what the events need."""
+    rollup: dict[str, object] = {
+        "packets": [],
+        "tool_calls": [],
+        "timestamps": [],
+        "user_excerpts": [],
+        "assistant_excerpts": [],
+        "commentary_timestamps": [],
+        "tool_timestamps": [],
+        "tool_counter": Counter(),
+    }
+    for packet_index, logical_packet in scoped_packets:
+        packet_timestamps = [str(timestamp) for timestamp in logical_packet.get("timestamps", []) if str(timestamp or "").strip()]
+        rollup["timestamps"].extend(packet_timestamps)
+        packet_tool_calls = [detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)]
+        rollup["tool_calls"].extend([dict(detail) for detail in packet_tool_calls])
+
+        user_excerpts = head_tail_excerpts(
+            [str(message) for message in logical_packet.get("user_messages", [])],
+            limit=USER_HIGHLIGHT_LIMIT,
+            max_items=MAX_USER_HIGHLIGHTS,
+        )
+        assistant_excerpts = head_tail_excerpts(
+            [str(message) for message in logical_packet.get("assistant_messages", [])],
+            limit=ASSISTANT_HIGHLIGHT_LIMIT,
+            max_items=MAX_ASSISTANT_HIGHLIGHTS,
+        )
+        for excerpt in user_excerpts:
+            if excerpt not in rollup["user_excerpts"] and len(rollup["user_excerpts"]) < MAX_USER_HIGHLIGHTS:
+                rollup["user_excerpts"].append(excerpt)
+        for excerpt in assistant_excerpts:
+            if excerpt not in rollup["assistant_excerpts"] and len(rollup["assistant_excerpts"]) < MAX_ASSISTANT_HIGHLIGHTS:
+                rollup["assistant_excerpts"].append(excerpt)
+        if packet_timestamps:
+            if user_excerpts or assistant_excerpts:
+                rollup["commentary_timestamps"].append(packet_timestamps[-1])
+            if packet_tool_calls:
+                rollup["tool_timestamps"].append(last_tool_timestamp(packet_tool_calls, packet_timestamps[-1]))
+        rollup["packets"].append(
+            {
+                "packet_index": packet_index,
+                "started_at": logical_packet.get("started_at"),
+                "ended_at": logical_packet.get("ended_at"),
+                "session_id": session_id,
+                "cwd": session_workspace,
+                "message_count": logical_packet.get("message_count"),
+                "user_message_count": logical_packet.get("user_message_count"),
+                "assistant_message_count": logical_packet.get("assistant_message_count"),
+                "user_highlights": user_excerpts,
+                "assistant_highlights": assistant_excerpts,
+                "assistant_summary": assistant_excerpts[-1] if assistant_excerpts else None,
+                "tool_signals": [str(tool) for tool in logical_packet.get("tools", []) if str(tool or "").strip()],
+                "tool_call_details": [dict(detail) for detail in packet_tool_calls],
+                "referenced_files": list(logical_packet.get("referenced_files", [])),
+            }
+        )
+        for detail in packet_tool_calls:
+            tool_name = str(detail.get("name") or "").strip().lower()
+            if tool_name:
+                rollup["tool_counter"][tool_name] += 1
+    return rollup
+
+
+def build_session_events(
+    *,
+    session_id: str,
+    meta_details: dict[str, object],
+    rollup: dict[str, object],
+    history_entry: dict[str, object],
+    turns: list[dict[str, object]],
+    start,
+    end,
+) -> list[dict[str, object]]:
+    """session_meta, commentary, and tool_call events for one Codex session."""
+    bounded = start is not None or end is not None
+    session_timestamp = (
+        earliest_iso_timestamp(rollup["timestamps"])
+        or (meta_details.get("timestamp") if not bounded else None)
+        or ((history_entry["timestamps"][0] if history_entry["timestamps"] else None) if not bounded else None)
+        or None
+    )
+    if session_timestamp is None:
+        return []
+    commentary_anchor = rollup["commentary_timestamps"][-1] if rollup["commentary_timestamps"] else session_timestamp
+    user_excerpts = list(history_entry["user_excerpts"])
+    for excerpt in rollup["user_excerpts"]:
+        if excerpt not in user_excerpts and len(user_excerpts) < MAX_USER_HIGHLIGHTS:
+            user_excerpts.append(excerpt)
+    first_request = user_excerpts[0] if user_excerpts else "No user prompt captured"
+    assistant_excerpts = rollup["assistant_excerpts"]
+    referenced_files = list(
+        dict.fromkeys(
+            str(path)
+            for packet in rollup["packets"]
+            for path in packet.get("referenced_files", [])
+            if str(path or "").strip()
+        )
+    )[:20]
+
+    def in_window(timestamp: object) -> bool:
+        return within_range(timestamp, start, end) or not bounded
+
+    events: list[dict[str, object]] = []
+    if in_window(session_timestamp):
+        session_summary = f"Codex session in {meta_details.get('cwd', 'unknown workspace')}"
+        events.append(
+            {
+                "source": SOURCE_NAME,
+                "timestamp": session_timestamp,
+                "type": "session_meta",
+                "summary": summarize_text(session_summary, 140),
+                "details": {
+                    "session_id": session_id,
+                    "cwd": meta_details.get("cwd"),
+                    "originator": meta_details.get("originator"),
+                    "cli_version": meta_details.get("cli_version"),
+                    "model_provider": meta_details.get("model_provider"),
+                    "git": meta_details.get("git"),
+                    "turns": turns,
+                    "logical_packets": rollup["packets"],
+                    "logical_packet_count": len(rollup["packets"]),
+                    "user_highlights": user_excerpts,
+                    "assistant_highlights": assistant_excerpts,
+                    "referenced_files": referenced_files,
+                },
+                "confidence": "medium",
+            }
+        )
+    if commentary_anchor and in_window(commentary_anchor):
+        events.append(
+            {
+                "source": SOURCE_NAME,
+                "timestamp": commentary_anchor,
+                "type": "commentary",
+                "summary": f"Codex commentary: {summarize_text(first_request, 96)}",
+                "details": {
+                    "session_id": session_id,
+                    "cwd": meta_details.get("cwd"),
+                    "user_highlights": user_excerpts,
+                    "assistant_highlights": assistant_excerpts,
+                    "referenced_files": referenced_files,
+                },
+                "confidence": "medium",
+            }
+        )
+    tool_counter = rollup["tool_counter"]
+    if tool_counter and rollup["tool_timestamps"]:
+        tool_summary = ", ".join(f"{name} x{count}" for name, count in tool_counter.most_common(5))
+        events.append(
+            {
+                "source": SOURCE_NAME,
+                "timestamp": rollup["tool_timestamps"][-1],
+                "type": "tool_call",
+                "summary": f"Codex tool usage: {tool_summary}",
+                "details": {
+                    "session_id": session_id,
+                    "cwd": meta_details.get("cwd"),
+                    "tools": [{"name": name, "count": count} for name, count in tool_counter.most_common()],
+                    "total_calls": sum(tool_counter.values()),
+                    "tool_call_details": rollup["tool_calls"][:8],
+                },
+                "confidence": "high",
+            }
+        )
+    return events
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -215,54 +426,16 @@ def main() -> None:
             emit(skipped_response(SOURCE_NAME, "not_found", history_file=str(history_file), sessions_root=str(sessions_root)))
             return
 
-        mapped_rollouts: dict[str, Path] = {}
-        for rollout in rollout_files:
-            meta = session_meta_from_rollout(rollout)
-            if not meta:
-                continue
-            session_id = meta.get("id")
-            if not session_id:
-                continue
-            mapped_rollouts[session_id] = rollout
-
         bounded = start is not None or end is not None
         events = []
-        for session_id, rollout in sorted(mapped_rollouts.items()):
-
-            history_entry = (
-                filtered_history_index.get(session_id, {"timestamps": [], "user_excerpts": [], "user_messages": []})
-                if bounded
-                else full_history_index.get(session_id, {"timestamps": [], "user_excerpts": [], "user_messages": []})
-            )
-            meta_details: dict[str, object] | None = None
-            records: list[dict[str, object]] = []
-
-            with rollout.open(encoding="utf-8") as handle:
-                for raw_line in handle:
-                    raw_line = raw_line.strip()
-                    if not raw_line:
-                        continue
-                    try:
-                        record = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    records.append(record)
-                    record_type = record.get("type")
-
-                    if record_type == "session_meta":
-                        payload = record.get("payload", {})
-                        session_cwd = payload.get("cwd")
-                        if workspace and not is_within_path(session_cwd, workspace):
-                            meta_details = None
-                            break
-                        meta_details = payload
-
+        for session_id, rollout in sorted(map_rollouts_by_session(rollout_files).items()):
+            history_index = filtered_history_index if bounded else full_history_index
+            history_entry = history_index.get(session_id, {"timestamps": [], "user_excerpts": [], "user_messages": []})
+            meta_details, records = read_rollout(rollout, workspace)
             if meta_details is None:
                 continue
 
             session_workspace = str(meta_details.get("cwd") or "") or None
-            turns = extract_codex_turns(records, start, end)
             logical_packets = build_codex_logical_packets(
                 records,
                 session_id=session_id,
@@ -272,8 +445,6 @@ def main() -> None:
                 session_started_at=meta_details.get("timestamp"),
                 gap_hours=args.gap_hours,
             )
-            if not logical_packets:
-                continue
             scoped_packets = [
                 (packet_index, logical_packet)
                 for packet_index, logical_packet in enumerate(logical_packets)
@@ -282,161 +453,18 @@ def main() -> None:
             if not scoped_packets:
                 continue
 
-            serialized_packets: list[dict[str, object]] = []
-            aggregated_tool_calls: list[dict[str, object]] = []
-            group_timestamps: list[str] = []
-            assistant_excerpts: list[str] = []
-            event_user_excerpts: list[str] = []
-            commentary_timestamps: list[str] = []
-            tool_timestamps: list[str] = []
-            tool_counter: Counter[str] = Counter()
-            for packet_index, logical_packet in scoped_packets:
-                packet_timestamps = [str(timestamp) for timestamp in logical_packet.get("timestamps", []) if str(timestamp or "").strip()]
-                group_timestamps.extend(packet_timestamps)
-                packet_user_messages = [str(message) for message in logical_packet.get("user_messages", [])]
-                packet_assistant_messages = [str(message) for message in logical_packet.get("assistant_messages", [])]
-                packet_tool_names = [str(tool) for tool in logical_packet.get("tools", []) if str(tool or "").strip()]
-                packet_tool_calls = [detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)]
-                aggregated_tool_calls.extend([dict(detail) for detail in packet_tool_calls])
-
-                user_excerpts = head_tail_excerpts(
-                    packet_user_messages,
-                    limit=USER_HIGHLIGHT_LIMIT,
-                    max_items=MAX_USER_HIGHLIGHTS,
+            rollup = summarize_packets(scoped_packets, session_id=session_id, session_workspace=session_workspace)
+            events.extend(
+                build_session_events(
+                    session_id=session_id,
+                    meta_details=meta_details,
+                    rollup=rollup,
+                    history_entry=history_entry,
+                    turns=extract_codex_turns(records, start, end),
+                    start=start,
+                    end=end,
                 )
-                assistant_packet_excerpts = head_tail_excerpts(
-                    packet_assistant_messages,
-                    limit=ASSISTANT_HIGHLIGHT_LIMIT,
-                    max_items=MAX_ASSISTANT_HIGHLIGHTS,
-                )
-                for excerpt in user_excerpts:
-                    if excerpt not in event_user_excerpts and len(event_user_excerpts) < MAX_USER_HIGHLIGHTS:
-                        event_user_excerpts.append(excerpt)
-                for excerpt in assistant_packet_excerpts:
-                    if excerpt not in assistant_excerpts and len(assistant_excerpts) < MAX_ASSISTANT_HIGHLIGHTS:
-                        assistant_excerpts.append(excerpt)
-                if packet_timestamps:
-                    if user_excerpts or assistant_packet_excerpts:
-                        commentary_timestamps.append(packet_timestamps[-1])
-                    if packet_tool_calls:
-                        tool_timestamps.append(
-                            next(
-                                (
-                                    str(detail.get("timestamp"))
-                                    for detail in reversed(packet_tool_calls)
-                                    if str(detail.get("timestamp") or "").strip()
-                                ),
-                                packet_timestamps[-1],
-                            )
-                        )
-                serialized_packets.append(
-                    {
-                        "packet_index": packet_index,
-                        "started_at": logical_packet.get("started_at"),
-                        "ended_at": logical_packet.get("ended_at"),
-                        "session_id": session_id,
-                        "cwd": session_workspace,
-                        "message_count": logical_packet.get("message_count"),
-                        "user_message_count": logical_packet.get("user_message_count"),
-                        "assistant_message_count": logical_packet.get("assistant_message_count"),
-                        "user_highlights": user_excerpts,
-                        "assistant_highlights": assistant_packet_excerpts,
-                        "assistant_summary": assistant_packet_excerpts[-1] if assistant_packet_excerpts else None,
-                        "tool_signals": packet_tool_names,
-                        "tool_call_details": [dict(detail) for detail in packet_tool_calls],
-                        "referenced_files": list(logical_packet.get("referenced_files", [])),
-                    }
-                )
-                for detail in packet_tool_calls:
-                    tool_name = str(detail.get("name") or "").strip().lower()
-                    if tool_name:
-                        tool_counter[tool_name] += 1
-
-            packet_window_start = earliest_iso_timestamp(group_timestamps)
-            session_timestamp = (
-                packet_window_start
-                or (meta_details.get("timestamp") if not bounded else None)
-                or ((history_entry["timestamps"][0] if history_entry["timestamps"] else None) if not bounded else None)
-                or None
             )
-            if session_timestamp is None:
-                continue
-            commentary_anchor = commentary_timestamps[-1] if commentary_timestamps else session_timestamp
-            merged_user_excerpts = list(history_entry["user_excerpts"])
-            for excerpt in event_user_excerpts:
-                if excerpt not in merged_user_excerpts and len(merged_user_excerpts) < MAX_USER_HIGHLIGHTS:
-                    merged_user_excerpts.append(excerpt)
-            user_excerpt = merged_user_excerpts[0] if merged_user_excerpts else "No user prompt captured"
-            referenced_files = list(
-                dict.fromkeys(
-                    str(path)
-                    for packet in serialized_packets
-                    for path in packet.get("referenced_files", [])
-                    if str(path or "").strip()
-                )
-            )[:20]
-
-            session_summary = f"Codex session in {meta_details.get('cwd', 'unknown workspace')}"
-            if within_range(session_timestamp, start, end) or (start is None and end is None):
-                events.append(
-                    {
-                        "source": SOURCE_NAME,
-                        "timestamp": session_timestamp,
-                        "type": "session_meta",
-                        "summary": summarize_text(session_summary, 140),
-                        "details": {
-                            "session_id": session_id,
-                            "cwd": meta_details.get("cwd"),
-                            "originator": meta_details.get("originator"),
-                            "cli_version": meta_details.get("cli_version"),
-                            "model_provider": meta_details.get("model_provider"),
-                            "git": meta_details.get("git"),
-                            "turns": turns,
-                            "logical_packets": serialized_packets,
-                            "logical_packet_count": len(serialized_packets),
-                            "user_highlights": merged_user_excerpts,
-                            "assistant_highlights": assistant_excerpts,
-                            "referenced_files": referenced_files,
-                        },
-                        "confidence": "medium",
-                    }
-                )
-            if commentary_anchor and (within_range(commentary_anchor, start, end) or (start is None and end is None)):
-                events.append(
-                    {
-                        "source": SOURCE_NAME,
-                        "timestamp": commentary_anchor,
-                        "type": "commentary",
-                        "summary": f"Codex commentary: {summarize_text(user_excerpt, 96)}",
-                        "details": {
-                            "session_id": session_id,
-                            "cwd": meta_details.get("cwd"),
-                            "user_highlights": merged_user_excerpts,
-                            "assistant_highlights": assistant_excerpts,
-                            "referenced_files": referenced_files,
-                        },
-                        "confidence": "medium",
-                    }
-                )
-
-            if tool_counter and tool_timestamps:
-                tool_summary = ", ".join(f"{name} x{count}" for name, count in tool_counter.most_common(5))
-                events.append(
-                    {
-                        "source": SOURCE_NAME,
-                        "timestamp": tool_timestamps[-1],
-                        "type": "tool_call",
-                        "summary": f"Codex tool usage: {tool_summary}",
-                        "details": {
-                            "session_id": session_id,
-                            "cwd": meta_details.get("cwd"),
-                            "tools": [{"name": name, "count": count} for name, count in tool_counter.most_common()],
-                            "total_calls": sum(tool_counter.values()),
-                            "tool_call_details": aggregated_tool_calls[:8],
-                        },
-                        "confidence": "high",
-                    }
-                )
 
         events.sort(key=lambda event: event["timestamp"] or "", reverse=True)
         emit(

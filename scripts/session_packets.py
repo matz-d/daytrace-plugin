@@ -883,6 +883,18 @@ def codex_user_message_text(record: dict[str, Any]) -> str | None:
     return clean_request_text("\n".join(parts))
 
 
+def _empty_codex_packet() -> dict[str, Any]:
+    return {
+        "timestamps": [],
+        "user_messages": [],
+        "assistant_messages": [],
+        "tools": [],
+        "tool_calls": [],
+        "pending_tool_calls": [],
+        "has_non_user_activity": False,
+    }
+
+
 def build_codex_logical_packets(
     records: list[dict[str, Any]],
     *,
@@ -894,15 +906,7 @@ def build_codex_logical_packets(
     gap_hours: int = DEFAULT_GAP_HOURS,
 ) -> list[dict[str, Any]]:
     logical_packets: list[dict[str, Any]] = []
-    packet: dict[str, Any] = {
-        "timestamps": [],
-        "user_messages": [],
-        "assistant_messages": [],
-        "tools": [],
-        "tool_calls": [],
-        "pending_tool_calls": [],
-        "has_non_user_activity": False,
-    }
+    packet: dict[str, Any] = _empty_codex_packet()
     history_messages = [str(message) for message in (history_user_messages or []) if str(message or "").strip()]
     history_timestamps_list = [timestamp for timestamp in (history_timestamps or []) if timestamp not in (None, "")]
     history_used = False
@@ -919,15 +923,7 @@ def build_codex_logical_packets(
             user_messages = merged_user_messages
             history_used = True
         if not packet["timestamps"] and not user_messages and not packet["assistant_messages"] and not packet["tool_calls"]:
-            packet = {
-                "timestamps": [],
-                "user_messages": [],
-                "assistant_messages": [],
-                "tools": [],
-                "tool_calls": [],
-                "pending_tool_calls": [],
-                "has_non_user_activity": False,
-            }
+            packet = _empty_codex_packet()
             return
         referenced_files = _dedupe_texts(
             [
@@ -961,15 +957,7 @@ def build_codex_logical_packets(
                 "assistant_message_count": len(packet["assistant_messages"]),
             }
         )
-        packet = {
-            "timestamps": [],
-            "user_messages": [],
-            "assistant_messages": [],
-            "tools": [],
-            "tool_calls": [],
-            "pending_tool_calls": [],
-            "has_non_user_activity": False,
-        }
+        packet = _empty_codex_packet()
 
     def ensure_packet_boundary(current_timestamp: Any) -> None:
         nonlocal last_timestamp

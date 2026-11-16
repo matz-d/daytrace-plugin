@@ -7,7 +7,8 @@
 | `collect_daily.py` | 今日（と、未保存なら昨日）のログを集めて store に保存する。launchd / cron 向けの入口 |
 | `read_log.py` | store から指定日・期間のイベントを時系列で読み出す |
 | `aggregate.py` | 各 source を実行して統合 JSON を返し、store に保存するオーケストレーター |
-| `aggregate_core.py` | 日付の解決・source 実行・時系列とグループの組み立て |
+| `aggregate_core.py` | 日付の解決・source の実行と結果の正規化・時系列の組み立て |
+| `grouping.py` | 時系列を近い活動ごとのグループにまとめる（confidence、scope、共有可否、evidence） |
 | `store.py` / `derived_store.py` | SQLite store の書き込み / 読み出し |
 | `request_text.py` | 依頼文から、ツールが差し込んだ文（system-reminder、引き継ぎ要約など）を除く |
 | `common.py` | 共有ユーティリティ（JSON I/O, 日時, エラー処理） |

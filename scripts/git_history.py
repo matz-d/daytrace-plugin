@@ -13,6 +13,7 @@ from common import (
     apply_limit,
     emit,
     error_response,
+    git_repo_context,
     isoformat,
     parse_datetime,
     resolve_workspace,
@@ -21,7 +22,6 @@ from common import (
     success_response,
     summarize_text,
 )
-
 
 SOURCE_NAME = "git-history"
 GIT_TIMEOUT_SEC = 10
@@ -60,18 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def repo_context(workspace: Path) -> tuple[Path, str] | None:
-    repo_check = run_command(
-        ["git", "-C", str(workspace), "rev-parse", "--show-toplevel"],
-        timeout=GIT_TIMEOUT_SEC,
-    )
-    if repo_check.returncode != 0:
-        return None
-
-    repo_root = Path(repo_check.stdout.strip()).resolve()
-    relative = "."
-    if workspace != repo_root:
-        relative = str(workspace.relative_to(repo_root))
-    return repo_root, relative
+    return git_repo_context(workspace, timeout=GIT_TIMEOUT_SEC, run=run_command)
 
 
 def parse_numstat(record: str, repo_root: Path, workspace: Path) -> dict[str, object] | None:

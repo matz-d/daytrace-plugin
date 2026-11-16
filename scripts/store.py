@@ -355,6 +355,40 @@ def _upsert_source_run(
     return int(row["id"])
 
 
+def observation_rows(
+    events: list[dict[str, Any]],
+    *,
+    source_run_id: int,
+    scope_mode: str,
+    collected_at: str,
+) -> list[tuple[Any, ...]]:
+    """INSERT parameters for the events of one source run. Events with the same fingerprint are stored once."""
+    rows: list[tuple[Any, ...]] = []
+    seen_fingerprints: set[str] = set()
+    for event in events:
+        event_fingerprint = compute_observation_fingerprint(event)
+        if event_fingerprint in seen_fingerprints:
+            continue
+        seen_fingerprints.add(event_fingerprint)
+        rows.append(
+            (
+                source_run_id,
+                event_fingerprint,
+                "event",
+                event["source"],
+                scope_mode,
+                to_storage_timestamp(event["timestamp"]),
+                event["type"],
+                event["summary"],
+                event["confidence"],
+                canonical_json(event["details"]),
+                canonical_json(event),
+                collected_at,
+            )
+        )
+    return rows
+
+
 def _replace_observations(
     connection: sqlite3.Connection,
     *,
@@ -364,50 +398,30 @@ def _replace_observations(
     collected_at: str,
 ) -> None:
     connection.execute("DELETE FROM observations WHERE source_run_id = ?", (source_run_id,))
-    inserted_fingerprints: set[str] = set()
-
-    def insert_event(event: dict[str, Any], *, observation_kind: str) -> None:
-        event_fingerprint = compute_observation_fingerprint(event)
-        if event_fingerprint in inserted_fingerprints:
-            return
-        inserted_fingerprints.add(event_fingerprint)
-        event_json_str = canonical_json(event)
-        details_json_str = canonical_json(event["details"])
-        connection.execute(
-            """
-            INSERT INTO observations (
-                source_run_id,
-                event_fingerprint,
-                observation_kind,
-                source_name,
-                scope_mode,
-                occurred_at,
-                event_type,
-                summary,
-                confidence,
-                details_json,
-                event_json,
-                collected_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                source_run_id,
-                event_fingerprint,
-                observation_kind,
-                event["source"],
-                scope_mode,
-                to_storage_timestamp(event["timestamp"]),
-                event["type"],
-                event["summary"],
-                event["confidence"],
-                details_json_str,
-                event_json_str,
-                collected_at,
-            ),
-        )
-
-    for event in result.get("events", []):
-        insert_event(event, observation_kind="event")
+    connection.executemany(
+        """
+        INSERT INTO observations (
+            source_run_id,
+            event_fingerprint,
+            observation_kind,
+            source_name,
+            scope_mode,
+            occurred_at,
+            event_type,
+            summary,
+            confidence,
+            details_json,
+            event_json,
+            collected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        observation_rows(
+            result.get("events", []),
+            source_run_id=source_run_id,
+            scope_mode=scope_mode,
+            collected_at=collected_at,
+        ),
+    )
 
 
 def _persist_source_result(
@@ -468,38 +482,4 @@ def persist_source_result(
             all_sessions=all_sessions,
             collected_at=collected_at_iso,
         )
-        connection.commit()
-
-
-def persist_source_results(
-    source_results: list[dict[str, Any]],
-    source_lookup: dict[str, dict[str, Any]],
-    *,
-    workspace: Path,
-    requested_date: str | None,
-    since: str | None,
-    until: str | None,
-    all_sessions: bool,
-    store_path: Path,
-    collected_at: datetime | None = None,
-) -> None:
-    bootstrap_store(store_path)
-    collected_at_iso = isoformat_or_now(collected_at)
-    with connect_store(store_path) as connection:
-        for result in source_results:
-            source_name = result.get("manifest_source_name", result["source"])
-            source = source_lookup.get(source_name)
-            if source is None:
-                raise ValueError(f"Missing source metadata for persisted result: {source_name}")
-            _persist_source_result(
-                connection,
-                result,
-                source,
-                workspace=workspace,
-                requested_date=requested_date,
-                since=since,
-                until=until,
-                all_sessions=all_sessions,
-                collected_at=collected_at_iso,
-            )
         connection.commit()

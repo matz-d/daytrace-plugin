@@ -59,7 +59,7 @@ def days_to_collect(store_path: Path, workspace: Path, now: datetime) -> list[st
     return days
 
 
-def collect(day: str, *, workspace: Path, store_path: Path, timeout: int, sources_file: str | None = None) -> dict[str, object]:
+def aggregate_command(day: str, *, workspace: Path, store_path: Path, sources_file: str | None = None) -> list[str]:
     command = [
         sys.executable,
         str(SCRIPT_DIR / "aggregate.py"),
@@ -73,10 +73,11 @@ def collect(day: str, *, workspace: Path, store_path: Path, timeout: int, source
     ]
     if sources_file:
         command.extend(["--sources-file", sources_file])
-    try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=str(workspace))
-    except subprocess.TimeoutExpired:
-        return {"date": day, "status": "error", "message": f"aggregate.py did not finish within {timeout} seconds"}
+    return command
+
+
+def day_result(day: str, completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
+    """Reduce one aggregate.py run to the per-source statuses the collection log keeps."""
     if completed.returncode != 0:
         return {"date": day, "status": "error", "message": completed.stderr.strip()[-2000:]}
     try:
@@ -101,6 +102,15 @@ def collect(day: str, *, workspace: Path, store_path: Path, timeout: int, source
         "sources": sources,
         **({"store_errors": store_errors} if store_errors else {}),
     }
+
+
+def collect(day: str, *, workspace: Path, store_path: Path, timeout: int, sources_file: str | None = None) -> dict[str, object]:
+    command = aggregate_command(day, workspace=workspace, store_path=store_path, sources_file=sources_file)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout, cwd=str(workspace))
+    except subprocess.TimeoutExpired:
+        return {"date": day, "status": "error", "message": f"aggregate.py did not finish within {timeout} seconds"}
+    return day_result(day, completed)
 
 
 def main() -> None:

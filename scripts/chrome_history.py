@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import shutil
 import sqlite3
 import tempfile
@@ -202,12 +203,63 @@ def flow_summary(row: dict[str, object]) -> str:
     return summarize_text(f"{title or host}（{page_count}ページ）", 140)
 
 
+def read_profile_visits(profile: str, history_path: Path, start, end) -> list[tuple[str, str, str, int, int]]:
+    """Visits of one profile inside the time range, read from a temporary copy of its History DB.
+
+    Chrome keeps the live DB locked, so it is copied first. The copy is removed
+    and the connection closed even when reading fails.
+    """
+    with tempfile.NamedTemporaryFile(prefix=f"daytrace-{profile}-", suffix=".sqlite", delete=False) as temp_file:
+        temp_path = Path(temp_file.name)
+    rows: list[tuple[str, str, str, int, int]] = []
+    try:
+        shutil.copy2(history_path, temp_path)
+        with contextlib.closing(sqlite3.connect(temp_path)) as connection:
+            cursor = connection.execute(
+                """
+                SELECT urls.url, urls.title, urls.last_visit_time, urls.visit_count
+                FROM urls
+                WHERE urls.last_visit_time > 0
+                ORDER BY urls.last_visit_time DESC
+                """
+            )
+            for url, title, last_visit_time, visit_count in cursor.fetchall():
+                timestamp = chrome_timestamp_to_iso(last_visit_time)
+                if not within_range(timestamp, start, end):
+                    continue
+                rows.append((profile, normalize_url(url), title or "", last_visit_time, visit_count))
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return rows
+
+
+def visit_event(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "source": SOURCE_NAME,
+        "timestamp": str(row["timestamp"]),
+        "type": "browser_visit",
+        "summary": flow_summary(row),
+        "details": {
+            "profile": row["profile"],
+            "url": row["url"],
+            "title": row["title"],
+            "visit_count": row["visit_count"],
+            "host": row.get("host"),
+            "flow_key": row.get("flow_key"),
+            "page_count": row.get("page_count", 1),
+            "compressed": bool(row.get("compressed", False)),
+            "merged_urls": row.get("merged_urls", []),
+        },
+        "confidence": "low",
+    }
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
+    root = Path(args.root).expanduser().resolve()
     try:
-        root = Path(args.root).expanduser().resolve()
         start = parse_datetime(args.since, bound="start")
         end = parse_datetime(args.until, bound="end")
 
@@ -224,53 +276,9 @@ def main() -> None:
         checked_profiles = []
         for profile, history_path in history_files:
             checked_profiles.append(profile)
-            with tempfile.NamedTemporaryFile(prefix=f"daytrace-{profile}-", suffix=".sqlite", delete=False) as temp_file:
-                temp_path = Path(temp_file.name)
-            try:
-                shutil.copy2(history_path, temp_path)
-                connection = sqlite3.connect(temp_path)
-                cursor = connection.cursor()
-                cursor.execute(
-                    """
-                    SELECT urls.url, urls.title, urls.last_visit_time, urls.visit_count
-                    FROM urls
-                    WHERE urls.last_visit_time > 0
-                    ORDER BY urls.last_visit_time DESC
-                    """
-                )
-                for url, title, last_visit_time, visit_count in cursor.fetchall():
-                    timestamp = chrome_timestamp_to_iso(last_visit_time)
-                    if not within_range(timestamp, start, end):
-                        continue
+            raw_rows.extend(read_profile_visits(profile, history_path, start, end))
 
-                    normalized_url = normalize_url(url)
-                    raw_rows.append((profile, normalized_url, title or "", last_visit_time, visit_count))
-                connection.close()
-            finally:
-                temp_path.unlink(missing_ok=True)
-
-        events = []
-        for row in compress_visit_flows(collapse_visits(raw_rows)):
-            events.append(
-                {
-                    "source": SOURCE_NAME,
-                    "timestamp": str(row["timestamp"]),
-                    "type": "browser_visit",
-                    "summary": flow_summary(row),
-                    "details": {
-                        "profile": row["profile"],
-                        "url": row["url"],
-                        "title": row["title"],
-                        "visit_count": row["visit_count"],
-                        "host": row.get("host"),
-                        "flow_key": row.get("flow_key"),
-                        "page_count": row.get("page_count", 1),
-                        "compressed": bool(row.get("compressed", False)),
-                        "merged_urls": row.get("merged_urls", []),
-                    },
-                    "confidence": "low",
-                }
-            )
+        events = [visit_event(row) for row in compress_visit_flows(collapse_visits(raw_rows))]
         events.sort(key=lambda event: event["timestamp"], reverse=True)
         emit(
             success_response(

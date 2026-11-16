@@ -48,7 +48,7 @@ def collect_user_requests(records: list[dict[str, object]], workspace: Path | No
         message = record.get("message")
         if claude_message_is_tool_result_only(message):
             continue
-        text = clean_request_text(claude_message_text(message))
+        text = clean_request_text(user_turn_text(message))
         if text:
             requests.append({"timestamp": record.get("timestamp"), "text": text})
     return requests
@@ -86,7 +86,8 @@ def append_excerpt(bucket: list[str], value: str, *, limit: int, max_items: int)
         bucket.append(excerpt)
 
 
-def claude_message_text(message: object) -> str:
+def user_turn_text(message: object) -> str:
+    """Text of a user turn: its text blocks, or tool-call names when it has no text."""
     if not isinstance(message, dict):
         return extract_text(message)
 
@@ -110,6 +111,182 @@ def claude_message_text(message: object) -> str:
     return extract_text(message)
 
 
+def read_session_records(path: Path, start, end) -> list[dict[str, object]]:
+    """User and assistant turns of one session file inside the time range."""
+    records: list[dict[str, object]] = []
+    with path.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                record = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if record.get("type") not in {"user", "assistant"}:
+                continue
+            if record.get("isMeta") or record.get("isCompactSummary"):
+                continue
+            if not within_range(record.get("timestamp"), start, end):
+                continue
+            records.append(record)
+    return records
+
+
+def serialize_packet(packet_index: int, logical_packet: dict[str, object]) -> dict[str, object]:
+    user_excerpts = head_tail_excerpts(
+        [str(m) for m in logical_packet.get("user_messages", [])],
+        limit=USER_HIGHLIGHT_LIMIT,
+        max_items=MAX_USER_HIGHLIGHTS,
+    )
+    assistant_excerpts = head_tail_excerpts(
+        [str(m) for m in logical_packet.get("assistant_messages", [])],
+        limit=ASSISTANT_HIGHLIGHT_LIMIT,
+        max_items=MAX_ASSISTANT_HIGHLIGHTS,
+    )
+    return {
+        "packet_index": packet_index,
+        "started_at": logical_packet.get("started_at"),
+        "ended_at": logical_packet.get("ended_at"),
+        "session_id": logical_packet.get("session_id"),
+        "cwd": logical_packet.get("cwd"),
+        "is_sidechain": logical_packet.get("is_sidechain"),
+        "message_count": logical_packet.get("message_count"),
+        "user_message_count": logical_packet.get("user_message_count"),
+        "assistant_message_count": logical_packet.get("assistant_message_count"),
+        "user_highlights": user_excerpts,
+        "assistant_highlights": assistant_excerpts,
+        "assistant_summary": assistant_excerpts[-1] if assistant_excerpts else None,
+        "tool_signals": list(logical_packet.get("tools", [])),
+        "tool_call_details": [detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)],
+        "referenced_files": list(logical_packet.get("referenced_files", [])),
+    }
+
+
+def summarize_session(path: Path, logical_packets: list[dict[str, object]]) -> dict[str, object]:
+    """Roll the logical packets of one session file up into one session summary."""
+    group = empty_group(path)
+    group["packets"] = []
+    group["tool_calls"] = []
+    referenced_files: list[str] = []
+    for packet_index, logical_packet in enumerate(logical_packets):
+        group["session_id"] = logical_packet.get("session_id") or group["session_id"]
+        group["cwd"] = logical_packet.get("cwd") or group["cwd"]
+        group["is_sidechain"] = bool(logical_packet.get("is_sidechain")) or bool(group["is_sidechain"])
+        group["timestamps"].extend(logical_packet.get("timestamps", []))
+        group["message_count"] = int(group["message_count"]) + int(logical_packet.get("message_count") or 0)
+        group["user_count"] = int(group["user_count"]) + int(logical_packet.get("user_message_count") or 0)
+        group["assistant_count"] = int(group["assistant_count"]) + int(logical_packet.get("assistant_message_count") or 0)
+        group["tool_calls"].extend([detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)])
+        referenced_files.extend(
+            [str(value) for value in logical_packet.get("referenced_files", []) if str(value or "").strip()]
+        )
+        packet = serialize_packet(packet_index, logical_packet)
+        for excerpt in packet["user_highlights"]:
+            append_excerpt(group["user_excerpts"], excerpt, limit=USER_HIGHLIGHT_LIMIT, max_items=MAX_USER_HIGHLIGHTS)
+        for excerpt in packet["assistant_highlights"]:
+            append_excerpt(group["assistant_excerpts"], excerpt, limit=ASSISTANT_HIGHLIGHT_LIMIT, max_items=MAX_ASSISTANT_HIGHLIGHTS)
+        group["packets"].append(packet)
+    group["referenced_files"] = list(dict.fromkeys(referenced_files))[:20]
+    return group
+
+
+def build_session_events(group: dict[str, object], user_requests: list[dict[str, object]]) -> list[dict[str, object]]:
+    """session_summary, commentary (when there are excerpts), and tool_call (when tools ran)."""
+    timestamps = sorted(group["timestamps"])
+    if not timestamps:
+        return []
+    first_user = group["user_excerpts"][0] if group["user_excerpts"] else "No user prompt captured"
+    details = {
+        "cwd": group["cwd"],
+        "session_id": group["session_id"],
+        "file_path": group["file_path"],
+        "is_sidechain": group["is_sidechain"],
+        "message_count": group["message_count"],
+        "user_message_count": group["user_count"],
+        "assistant_message_count": group["assistant_count"],
+        "user_highlights": group["user_excerpts"],
+        "assistant_highlights": group["assistant_excerpts"],
+        "highlights": group["user_excerpts"] + group["assistant_excerpts"],
+        "user_requests": user_requests,
+        "logical_packets": group["packets"],
+        "logical_packet_count": len(group["packets"]),
+        "referenced_files": group["referenced_files"],
+    }
+    if group["assistant_excerpts"]:
+        details["assistant_summary"] = group["assistant_excerpts"][-1]
+
+    events: list[dict[str, object]] = [
+        {
+            "source": SOURCE_NAME,
+            "timestamp": timestamps[-1],
+            "type": "session_summary",
+            "summary": f"Claude session: {summarize_text(first_user, 96)}",
+            "details": details,
+            "confidence": "medium",
+        }
+    ]
+    if group["user_excerpts"] or group["assistant_excerpts"]:
+        events.append(
+            {
+                "source": SOURCE_NAME,
+                "timestamp": timestamps[-1],
+                "type": "commentary",
+                "summary": f"Claude commentary: {summarize_text(first_user, 96)}",
+                "details": {
+                    "cwd": group["cwd"],
+                    "session_id": group["session_id"],
+                    "file_path": group["file_path"],
+                    "user_highlights": group["user_excerpts"],
+                    "assistant_highlights": group["assistant_excerpts"],
+                    "assistant_summary": group["assistant_excerpts"][-1] if group["assistant_excerpts"] else None,
+                },
+                "confidence": "medium",
+            }
+        )
+    tool_event = build_tool_event(group, fallback_timestamp=timestamps[-1])
+    if tool_event:
+        events.append(tool_event)
+    return events
+
+
+def build_tool_event(group: dict[str, object], *, fallback_timestamp: str) -> dict[str, object] | None:
+    tool_calls = group["tool_calls"]
+    tool_counter = Counter(
+        str(detail.get("name") or "").strip().lower()
+        for detail in tool_calls
+        if str(detail.get("name") or "").strip()
+    )
+    if not tool_counter:
+        return None
+    latest_tool_timestamp = next(
+        (
+            str(detail.get("timestamp"))
+            for detail in reversed(tool_calls)
+            if str(detail.get("timestamp") or "").strip()
+        ),
+        fallback_timestamp,
+    )
+    tool_summary = ", ".join(f"{name} x{count}" for name, count in tool_counter.most_common(5))
+    return {
+        "source": SOURCE_NAME,
+        "timestamp": latest_tool_timestamp,
+        "type": "tool_call",
+        "summary": f"Claude tool usage: {tool_summary}",
+        "details": {
+            "cwd": group["cwd"],
+            "session_id": group["session_id"],
+            "file_path": group["file_path"],
+            "tools": [{"name": name, "count": count} for name, count in tool_counter.most_common()],
+            "total_calls": sum(tool_counter.values()),
+            "tool_call_details": tool_calls[:8],
+        },
+        "confidence": "high",
+    }
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -131,177 +308,16 @@ def main() -> None:
 
         events = []
         for path in jsonl_files:
-            filtered_records: list[dict[str, object]] = []
-            with path.open(encoding="utf-8") as handle:
-                for raw_line in handle:
-                    raw_line = raw_line.strip()
-                    if not raw_line:
-                        continue
-                    try:
-                        record = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(record, dict):
-                        continue
-                    record_type = record.get("type")
-                    if record_type not in {"user", "assistant"}:
-                        continue
-                    if record.get("isMeta") or record.get("isCompactSummary"):
-                        continue
-                    timestamp = record.get("timestamp")
-                    if not within_range(timestamp, start, end):
-                        continue
-                    filtered_records.append(record)
-
-            all_logical_packets = build_claude_logical_packets(filtered_records, DEFAULT_GAP_HOURS)
-            matched_packets = [
-                lp for lp in all_logical_packets
-                if not workspace or is_within_path(lp.get("cwd"), workspace)
+            records = read_session_records(path, start, end)
+            logical_packets = [
+                packet
+                for packet in build_claude_logical_packets(records, DEFAULT_GAP_HOURS)
+                if not workspace or is_within_path(packet.get("cwd"), workspace)
             ]
-            if not matched_packets:
+            if not logical_packets:
                 continue
-
-            group = empty_group(path)
-            user_requests = collect_user_requests(filtered_records, workspace)
-            serialized_packets: list[dict[str, object]] = []
-            aggregated_tool_calls: list[dict[str, object]] = []
-            aggregated_referenced_files: list[str] = []
-            for packet_index, logical_packet in enumerate(matched_packets):
-                group["session_id"] = logical_packet.get("session_id") or group["session_id"]
-                group["cwd"] = logical_packet.get("cwd") or group["cwd"]
-                group["is_sidechain"] = bool(logical_packet.get("is_sidechain")) or bool(group["is_sidechain"])
-                group["timestamps"].extend(logical_packet.get("timestamps", []))
-                group["message_count"] = int(group["message_count"]) + int(logical_packet.get("message_count") or 0)
-                group["user_count"] = int(group["user_count"]) + int(logical_packet.get("user_message_count") or 0)
-                group["assistant_count"] = int(group["assistant_count"]) + int(logical_packet.get("assistant_message_count") or 0)
-                aggregated_tool_calls.extend([detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)])
-                aggregated_referenced_files.extend(
-                    [str(value) for value in logical_packet.get("referenced_files", []) if str(value or "").strip()]
-                )
-
-                user_excerpts = head_tail_excerpts(
-                    [str(m) for m in logical_packet.get("user_messages", [])],
-                    limit=USER_HIGHLIGHT_LIMIT,
-                    max_items=MAX_USER_HIGHLIGHTS,
-                )
-                for excerpt in user_excerpts:
-                    append_excerpt(group["user_excerpts"], excerpt, limit=USER_HIGHLIGHT_LIMIT, max_items=MAX_USER_HIGHLIGHTS)
-                assistant_excerpts = head_tail_excerpts(
-                    [str(m) for m in logical_packet.get("assistant_messages", [])],
-                    limit=ASSISTANT_HIGHLIGHT_LIMIT,
-                    max_items=MAX_ASSISTANT_HIGHLIGHTS,
-                )
-                for excerpt in assistant_excerpts:
-                    append_excerpt(group["assistant_excerpts"], excerpt, limit=ASSISTANT_HIGHLIGHT_LIMIT, max_items=MAX_ASSISTANT_HIGHLIGHTS)
-
-                assistant_summary = assistant_excerpts[-1] if assistant_excerpts else None
-                packet_start = logical_packet.get("started_at")
-                serialized_packets.append(
-                    {
-                        "packet_index": packet_index,
-                        "started_at": packet_start,
-                        "ended_at": logical_packet.get("ended_at"),
-                        "session_id": logical_packet.get("session_id"),
-                        "cwd": logical_packet.get("cwd"),
-                        "is_sidechain": logical_packet.get("is_sidechain"),
-                        "message_count": logical_packet.get("message_count"),
-                        "user_message_count": logical_packet.get("user_message_count"),
-                        "assistant_message_count": logical_packet.get("assistant_message_count"),
-                        "user_highlights": user_excerpts,
-                        "assistant_highlights": assistant_excerpts,
-                        "assistant_summary": assistant_summary,
-                        "tool_signals": list(logical_packet.get("tools", [])),
-                        "tool_call_details": [detail for detail in logical_packet.get("tool_calls", []) if isinstance(detail, dict)],
-                        "referenced_files": list(logical_packet.get("referenced_files", [])),
-                    }
-                )
-
-            timestamps = sorted(group["timestamps"])
-            if not timestamps:
-                continue
-
-            referenced_files = list(dict.fromkeys(aggregated_referenced_files))[:20]
-            first_user = group["user_excerpts"][0] if group["user_excerpts"] else "No user prompt captured"
-            summary = f"Claude session: {summarize_text(first_user, 96)}"
-            details = {
-                "cwd": group["cwd"],
-                "session_id": group["session_id"],
-                "file_path": group["file_path"],
-                "is_sidechain": group["is_sidechain"],
-                "message_count": group["message_count"],
-                "user_message_count": group["user_count"],
-                "assistant_message_count": group["assistant_count"],
-                "user_highlights": group["user_excerpts"],
-                "assistant_highlights": group["assistant_excerpts"],
-                "highlights": group["user_excerpts"] + group["assistant_excerpts"],
-                "user_requests": user_requests,
-                "logical_packets": serialized_packets,
-                "logical_packet_count": len(serialized_packets),
-                "referenced_files": referenced_files,
-            }
-            if group["assistant_excerpts"]:
-                details["assistant_summary"] = group["assistant_excerpts"][-1]
-
-            events.append(
-                {
-                    "source": SOURCE_NAME,
-                    "timestamp": timestamps[-1],
-                    "type": "session_summary",
-                    "summary": summary,
-                    "details": details,
-                    "confidence": "medium",
-                }
-            )
-            if group["user_excerpts"] or group["assistant_excerpts"]:
-                events.append(
-                    {
-                        "source": SOURCE_NAME,
-                        "timestamp": timestamps[-1],
-                        "type": "commentary",
-                        "summary": f"Claude commentary: {summarize_text(first_user, 96)}",
-                        "details": {
-                            "cwd": group["cwd"],
-                            "session_id": group["session_id"],
-                            "file_path": group["file_path"],
-                            "user_highlights": group["user_excerpts"],
-                            "assistant_highlights": group["assistant_excerpts"],
-                            "assistant_summary": group["assistant_excerpts"][-1] if group["assistant_excerpts"] else None,
-                        },
-                        "confidence": "medium",
-                    }
-                )
-            tool_counter = Counter(
-                str(detail.get("name") or "").strip().lower()
-                for detail in aggregated_tool_calls
-                if str(detail.get("name") or "").strip()
-            )
-            if tool_counter:
-                latest_tool_timestamp = next(
-                    (
-                        str(detail.get("timestamp"))
-                        for detail in reversed(aggregated_tool_calls)
-                        if str(detail.get("timestamp") or "").strip()
-                    ),
-                    timestamps[-1],
-                )
-                tool_summary = ", ".join(f"{name} x{count}" for name, count in tool_counter.most_common(5))
-                events.append(
-                    {
-                        "source": SOURCE_NAME,
-                        "timestamp": latest_tool_timestamp,
-                        "type": "tool_call",
-                        "summary": f"Claude tool usage: {tool_summary}",
-                        "details": {
-                            "cwd": group["cwd"],
-                            "session_id": group["session_id"],
-                            "file_path": group["file_path"],
-                            "tools": [{"name": name, "count": count} for name, count in tool_counter.most_common()],
-                            "total_calls": sum(tool_counter.values()),
-                            "tool_call_details": aggregated_tool_calls[:8],
-                        },
-                        "confidence": "high",
-                    }
-                )
+            group = summarize_session(path, logical_packets)
+            events.extend(build_session_events(group, collect_user_requests(records, workspace)))
 
         events.sort(key=lambda event: event["timestamp"], reverse=True)
         emit(

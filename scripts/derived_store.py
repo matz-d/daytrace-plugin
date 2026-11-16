@@ -194,202 +194,51 @@ def get_source_runs(
     return [_row_to_source_run(row) for row in rows]
 
 
-def _query_time_bounds(
+def _observation_filters(
     *,
+    observation_kinds: list[str],
+    workspace: str | None,
     requested_date: str | None,
+    daily_runs_only: bool,
     since: str | None,
     until: str | None,
-) -> tuple[str | None, str | None]:
-    effective_since = since if since is not None else requested_date
-    effective_until = until if until is not None else requested_date
-    return (
-        _normalize_time_filter(effective_since, bound="start"),
-        _normalize_time_filter(effective_until, bound="end"),
-    )
+    all_sessions: bool | None,
+    source_names: list[str] | None,
+    source_run_ids: list[int] | None,
+) -> tuple[list[str], list[Any]]:
+    """WHERE clauses and their parameters for get_observations. `since`/`until` are storage timestamps."""
+    clauses: list[str] = []
+    parameters: list[Any] = []
 
+    def add_in(column: str, values: list[Any]) -> None:
+        clauses.append(f"{column} IN ({', '.join('?' for _ in values)})")
+        parameters.extend(values)
 
-def _source_run_covers_query(
-    source_run: dict[str, Any],
-    *,
-    requested_date: str | None,
-    normalized_since: str | None,
-    normalized_until: str | None,
-) -> bool:
-    if requested_date is None and normalized_since is None and normalized_until is None:
-        return True
-
-    run_since = _normalize_time_filter(source_run.get("since_value"), bound="start")
-    run_until = _normalize_time_filter(source_run.get("until_value"), bound="end")
-    if normalized_since is not None:
-        if run_since is None:
-            return False
-        run_since_dt = parse_datetime(run_since, bound="start")
-        query_since_dt = parse_datetime(normalized_since, bound="start")
-        if run_since_dt is None or query_since_dt is None or run_since_dt > query_since_dt:
-            return False
-    if normalized_until is not None:
-        if run_until is None:
-            return False
-        run_until_dt = parse_datetime(run_until, bound="end")
-        query_until_dt = parse_datetime(normalized_until, bound="end")
-        if run_until_dt is None or query_until_dt is None or run_until_dt < query_until_dt:
-            return False
-    return True
-
-
-def _source_run_priority(source_run: dict[str, Any], *, requested_date: str | None) -> tuple[float, float, float, int]:
-    run_since = parse_datetime(source_run.get("since_value"), bound="start")
-    run_until = parse_datetime(source_run.get("until_value"), bound="end")
-    if run_since is None or run_until is None:
-        window_span = float("inf")
-    else:
-        window_span = max((run_until - run_since).total_seconds(), 0.0)
-    collected_at = parse_datetime(source_run.get("collected_at"), bound="end")
-    collected_at_key = -(collected_at.timestamp()) if collected_at is not None else float("inf")
-    requested_date_match = 0.0 if requested_date is not None and source_run.get("requested_date") == requested_date else 1.0
-    return (
-        requested_date_match,
-        window_span,
-        collected_at_key,
-        -int(source_run["source_run_id"]),
-    )
-
-
-def get_slice_source_runs(
-    store_path: str | Path | None = None,
-    *,
-    workspace: str | Path | None = None,
-    requested_date: str | None = None,
-    since: str | None = None,
-    until: str | None = None,
-    all_sessions: bool | None = None,
-    source_names: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    normalized_store_path = resolve_store_path(store_path)
-    bootstrap_store(normalized_store_path)
-    candidate_runs = get_source_runs(
-        normalized_store_path,
-        workspace=workspace,
-        all_sessions=all_sessions,
-        source_names=source_names,
-    )
-    normalized_since, normalized_until = _query_time_bounds(
-        requested_date=requested_date,
-        since=since,
-        until=until,
-    )
-
-    if requested_date is None and normalized_since is None and normalized_until is None:
-        latest_by_source: dict[str, dict[str, Any]] = {}
-        for source_run in candidate_runs:
-            source_name = str(source_run["source_name"])
-            if source_name not in latest_by_source:
-                latest_by_source[source_name] = source_run
-        return [latest_by_source[name] for name in sorted(latest_by_source)]
-
-    selected_by_source: dict[str, dict[str, Any]] = {}
-    for source_run in candidate_runs:
-        if not _source_run_covers_query(
-            source_run,
-            requested_date=requested_date,
-            normalized_since=normalized_since,
-            normalized_until=normalized_until,
-        ):
-            continue
-        source_name = str(source_run["source_name"])
-        current = selected_by_source.get(source_name)
-        if current is None or _source_run_priority(source_run, requested_date=requested_date) < _source_run_priority(
-            current,
-            requested_date=requested_date,
-        ):
-            selected_by_source[source_name] = source_run
-    return [selected_by_source[name] for name in sorted(selected_by_source)]
-
-
-SLICE_COMPLETE = "complete"
-SLICE_PARTIAL = "partial"
-SLICE_DEGRADED = "degraded"
-SLICE_STALE = "stale"
-SLICE_EMPTY = "empty"
-
-
-def evaluate_slice_completeness(
-    store_path: str | Path | None = None,
-    *,
-    workspace: str | Path | None = None,
-    requested_date: str | None = None,
-    since: str | None = None,
-    until: str | None = None,
-    all_sessions: bool = False,
-    expected_source_names: set[str],
-    expected_fingerprints: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    """Evaluate how complete a stored slice is relative to expected sources.
-
-    Returns a dict with:
-      status: complete / partial / degraded / stale / empty
-      present_sources: set of source names in the slice
-      missing_sources: set of expected sources not in the slice
-      error_sources: set of sources with error status
-      skipped_sources: set of sources with skipped status
-      stale_sources: set of sources with mismatched manifest fingerprint
-    """
-    source_runs = get_slice_source_runs(
-        store_path,
-        workspace=workspace,
-        requested_date=requested_date,
-        since=since,
-        until=until,
-        all_sessions=all_sessions,
-    )
-    latest_by_source: dict[str, dict[str, Any]] = {}
-    for run in source_runs:
-        name = run["source_name"]
-        if name not in latest_by_source:
-            latest_by_source[name] = run
-
-    present = set(latest_by_source.keys())
-    relevant_present = present & expected_source_names
-    missing = expected_source_names - present
-    error_sources = {
-        name for name, run in latest_by_source.items()
-        if name in expected_source_names and run["status"] == "error"
-    }
-    skipped_sources = {
-        name for name, run in latest_by_source.items()
-        if name in expected_source_names and run["status"] == "skipped"
-    }
-    stale_sources: set[str] = set()
-    if expected_fingerprints:
-        for name, run in latest_by_source.items():
-            if name in expected_fingerprints:
-                if run["manifest_fingerprint"] != expected_fingerprints[name]:
-                    stale_sources.add(name)
-
-    if not relevant_present:
-        status = SLICE_EMPTY
-    elif stale_sources:
-        status = SLICE_STALE
-    elif missing:
-        status = SLICE_PARTIAL
-    elif error_sources:
-        status = SLICE_DEGRADED
-    else:
-        success_sources = {
-            name for name, run in latest_by_source.items()
-            if name in expected_source_names and run["status"] == "success"
-        }
-        status = SLICE_COMPLETE if success_sources == expected_source_names else SLICE_DEGRADED
-
-    return {
-        "status": status,
-        "present_sources": sorted(relevant_present),
-        "missing_sources": sorted(missing),
-        "error_sources": sorted(error_sources),
-        "skipped_sources": sorted(skipped_sources),
-        "stale_sources": sorted(stale_sources),
-        "source_run_count": len(source_runs),
-    }
+    add_in("o.observation_kind", observation_kinds)
+    if workspace is not None:
+        clauses.append("sr.workspace = ?")
+        parameters.append(workspace)
+    if requested_date is not None:
+        clauses.append("sr.requested_date = ?")
+        parameters.append(requested_date)
+    if daily_runs_only:
+        # Runs made with --date. Ad-hoc --since/--until runs (e.g. the removed
+        # 7-day pattern scan) summarize sessions differently and would duplicate them.
+        clauses.append("sr.requested_date IS NOT NULL")
+    if since is not None:
+        clauses.append("o.occurred_at >= ?")
+        parameters.append(since)
+    if until is not None:
+        clauses.append("o.occurred_at <= ?")
+        parameters.append(until)
+    if all_sessions is not None:
+        clauses.append("sr.all_sessions = ?")
+        parameters.append(1 if all_sessions else 0)
+    if source_names:
+        add_in("o.source_name", source_names)
+    if source_run_ids is not None:
+        add_in("o.source_run_id", source_run_ids)
+    return clauses, parameters
 
 
 def get_observations(
@@ -415,41 +264,17 @@ def get_observations(
     if not selected_observation_kinds:
         return []
 
-    clauses = []
-    parameters: list[Any] = []
-    placeholders = ", ".join("?" for _ in selected_observation_kinds)
-    clauses.append(f"o.observation_kind IN ({placeholders})")
-    parameters.extend(selected_observation_kinds)
-    if normalized_workspace is not None:
-        clauses.append("sr.workspace = ?")
-        parameters.append(normalized_workspace)
-    if requested_date is not None and selected_source_run_ids is None:
-        clauses.append("sr.requested_date = ?")
-        parameters.append(requested_date)
-    if daily_runs_only:
-        # Runs made with --date. Ad-hoc --since/--until runs (e.g. the removed
-        # 7-day pattern scan) summarize sessions differently and would duplicate them.
-        clauses.append("sr.requested_date IS NOT NULL")
-    normalized_since = _normalize_time_filter(since, bound="start")
-    normalized_until = _normalize_time_filter(until, bound="end")
-    if normalized_since is not None:
-        clauses.append("o.occurred_at >= ?")
-        parameters.append(normalized_since)
-    if normalized_until is not None:
-        clauses.append("o.occurred_at <= ?")
-        parameters.append(normalized_until)
-    if all_sessions is not None:
-        clauses.append("sr.all_sessions = ?")
-        parameters.append(1 if all_sessions else 0)
-    if source_names:
-        placeholders = ", ".join("?" for _ in source_names)
-        clauses.append(f"o.source_name IN ({placeholders})")
-        parameters.extend(source_names)
-    if selected_source_run_ids is not None:
-        placeholders = ", ".join("?" for _ in selected_source_run_ids)
-        clauses.append(f"o.source_run_id IN ({placeholders})")
-        parameters.extend(selected_source_run_ids)
-
+    clauses, parameters = _observation_filters(
+        observation_kinds=selected_observation_kinds,
+        workspace=normalized_workspace,
+        requested_date=requested_date if selected_source_run_ids is None else None,
+        daily_runs_only=daily_runs_only,
+        since=_normalize_time_filter(since, bound="start"),
+        until=_normalize_time_filter(until, bound="end"),
+        all_sessions=all_sessions,
+        source_names=source_names,
+        source_run_ids=selected_source_run_ids,
+    )
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     # Use a window function to deduplicate observations that share the same
     # event_fingerprint across different source_runs.  For each duplicate group

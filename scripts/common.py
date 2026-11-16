@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-
 LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
 URL_PATTERN = re.compile(r"https?://[^\s<>\"]+")
 
@@ -182,6 +181,20 @@ def run_command(args: list[str], *, cwd: str | Path | None = None, timeout: int 
         timeout=timeout,
         check=False,
     )
+
+
+def git_repo_context(workspace: Path, *, timeout: int, run=run_command) -> tuple[Path, str] | None:
+    """(repo root, workspace path relative to it as a git pathspec), or None outside a Git repo.
+
+    `run` is the caller's command runner, so tests that patch a module's
+    run_command still control this call.
+    """
+    repo_check = run(["git", "-C", str(workspace), "rev-parse", "--show-toplevel"], timeout=timeout)
+    if repo_check.returncode != 0:
+        return None
+    repo_root = Path(repo_check.stdout.strip()).resolve()
+    relative = "." if workspace == repo_root else str(workspace.relative_to(repo_root))
+    return repo_root, relative
 
 
 def default_chrome_root() -> Path | None:
