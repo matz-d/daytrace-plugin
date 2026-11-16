@@ -29,12 +29,32 @@ from skill_miner_common import (
     build_claude_logical_packets,
     build_claude_session_ref,
     build_packet,
+    claude_message_is_tool_result_only,
+    claude_message_text,
     head_tail_excerpts,
 )
+from request_text import clean_request_text
 
 
 SOURCE_NAME = "claude-history"
 DEFAULT_ROOT = Path.home() / ".claude" / "projects"
+
+
+def collect_user_requests(records: list[dict[str, object]], workspace: Path | None) -> list[dict[str, object]]:
+    """Each turn the user typed, in order. Subagent (sidechain) prompts are written by Claude, so they are left out."""
+    requests: list[dict[str, object]] = []
+    for record in records:
+        if record.get("type") != "user" or record.get("isSidechain"):
+            continue
+        if workspace and not is_within_path(record.get("cwd"), workspace):
+            continue
+        message = record.get("message")
+        if claude_message_is_tool_result_only(message):
+            continue
+        text = clean_request_text(claude_message_text(message))
+        if text:
+            requests.append({"timestamp": record.get("timestamp"), "text": text})
+    return requests
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -129,7 +149,7 @@ def main() -> None:
                     record_type = record.get("type")
                     if record_type not in {"user", "assistant"}:
                         continue
-                    if record.get("isMeta"):
+                    if record.get("isMeta") or record.get("isCompactSummary"):
                         continue
                     timestamp = record.get("timestamp")
                     if not within_range(timestamp, start, end):
@@ -145,6 +165,7 @@ def main() -> None:
                 continue
 
             group = empty_group(path)
+            user_requests = collect_user_requests(filtered_records, workspace)
             serialized_packets: list[dict[str, object]] = []
             aggregated_user_messages: list[str] = []
             aggregated_assistant_messages: list[str] = []
@@ -255,6 +276,7 @@ def main() -> None:
                 "user_highlights": group["user_excerpts"],
                 "assistant_highlights": group["assistant_excerpts"],
                 "highlights": group["user_excerpts"] + group["assistant_excerpts"],
+                "user_requests": user_requests,
                 "logical_packets": serialized_packets,
                 "logical_packet_count": len(serialized_packets),
                 "ai_observation": merged_ai_observation,

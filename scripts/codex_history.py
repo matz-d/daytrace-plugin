@@ -29,7 +29,7 @@ from skill_miner_common import (
     build_codex_logical_packets,
     build_codex_session_ref,
     build_packet,
-    codex_message_text,
+    codex_user_message_text,
     earliest_iso_timestamp,
     head_tail_excerpts,
 )
@@ -126,6 +126,72 @@ def logical_packet_within_range(packet: dict[str, object], start, end) -> bool:
     return within_range(packet.get("started_at"), start, end) or within_range(packet.get("ended_at"), start, end)
 
 
+def extract_codex_turns(records: list[dict[str, object]], start, end) -> list[dict[str, object]]:
+    """One entry per Codex turn: what was asked, what started it, and when it started and ended.
+
+    `trigger` is `composer` for a turn the user typed and e.g. `automation_cron_scheduled`
+    for a scheduled run. Older rollouts have no turn ids; their requests become
+    entries without trigger or end time.
+    """
+    turns: dict[str, dict[str, object]] = {}
+    order: list[str] = []
+
+    def turn_for(turn_id: str) -> dict[str, object]:
+        if turn_id not in turns:
+            turns[turn_id] = {"turn_id": turn_id, "trigger": None, "started_at": None, "completed_at": None, "requests": []}
+            order.append(turn_id)
+        return turns[turn_id]
+
+    anonymous = 0
+    for record in records:
+        payload = record.get("payload")
+        if record.get("type") != "event_msg" or not isinstance(payload, dict):
+            continue
+        timestamp = record.get("timestamp")
+        payload_type = payload.get("type")
+        if payload_type == "task_started":
+            attribution = payload.get("turn_attribution") if isinstance(payload.get("turn_attribution"), dict) else {}
+            turn_id = str(attribution.get("turn_id") or payload.get("turn_id") or "")
+            if turn_id:
+                turn = turn_for(turn_id)
+                turn["trigger"] = attribution.get("turn_trigger")
+                turn["started_at"] = turn["started_at"] or timestamp
+            continue
+        if payload_type == "task_complete":
+            turn_id = str(payload.get("turn_id") or "")
+            if turn_id:
+                turn_for(turn_id)["completed_at"] = timestamp
+            continue
+        text = codex_user_message_text(record)
+        if not text:
+            continue
+        turn_id = str(payload.get("turn_id") or "")
+        if not turn_id:
+            anonymous += 1
+            turn_id = f"untracked-{anonymous:03d}"
+        turn = turn_for(turn_id)
+        turn["started_at"] = turn["started_at"] or timestamp
+        turn["requests"].append(text)
+
+    result: list[dict[str, object]] = []
+    for turn_id in order:
+        turn = turns[turn_id]
+        if not turn["requests"] and turn["trigger"] is None:
+            continue
+        if not within_range(turn["started_at"], start, end):
+            continue
+        result.append(
+            {
+                "turn_id": turn_id,
+                "trigger": turn["trigger"],
+                "started_at": turn["started_at"],
+                "completed_at": turn["completed_at"],
+                "request": "\n\n".join(str(text) for text in turn["requests"]),
+            }
+        )
+    return result
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -194,6 +260,7 @@ def main() -> None:
                 continue
 
             session_workspace = str(meta_details.get("cwd") or "") or None
+            turns = extract_codex_turns(records, start, end)
             logical_packets = build_codex_logical_packets(
                 records,
                 session_id=session_id,
@@ -361,6 +428,7 @@ def main() -> None:
                             "cli_version": meta_details.get("cli_version"),
                             "model_provider": meta_details.get("model_provider"),
                             "git": meta_details.get("git"),
+                            "turns": turns,
                             "logical_packets": serialized_packets,
                             "logical_packet_count": len(serialized_packets),
                             "user_highlights": merged_user_excerpts,

@@ -10,10 +10,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Generator
 
-from common import isoformat_or_now
+from common import isoformat_or_now, to_storage_timestamp
 from source_registry import normalize_confidence_categories
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_STORE_PATH = Path("~/.daytrace/daytrace.sqlite3").expanduser()
 AI_HISTORY_SOURCES = {"claude-history", "codex-history"}
 
@@ -100,9 +100,7 @@ def _table_columns(connection: sqlite3.Connection, table_name: str) -> set[str]:
 
 
 def _create_base_schema(connection: sqlite3.Connection) -> None:
-    # All tables are created together to simplify migration.
-    # Populate responsibility: store.py owns source_runs/observations;
-    # derived_store.py owns activities/patterns.
+    # store.py owns source_runs/observations. derived_store.py only reads them.
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS source_runs (
@@ -159,55 +157,6 @@ def _create_base_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_observations_source_name
         ON observations(source_name, occurred_at);
-
-        CREATE TABLE IF NOT EXISTS activities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            query_fingerprint TEXT NOT NULL,
-            derivation_version TEXT NOT NULL,
-            input_fingerprint TEXT NOT NULL,
-            workspace TEXT,
-            since_value TEXT,
-            until_value TEXT,
-            group_window_minutes INTEGER NOT NULL,
-            activity_id TEXT NOT NULL,
-            start_timestamp TEXT NOT NULL,
-            end_timestamp TEXT NOT NULL,
-            summary TEXT NOT NULL,
-            confidence TEXT NOT NULL,
-            sources_json TEXT NOT NULL,
-            confidence_categories_json TEXT NOT NULL,
-            source_count INTEGER NOT NULL,
-            event_count INTEGER NOT NULL,
-            evidence_json TEXT NOT NULL,
-            observation_fingerprints_json TEXT NOT NULL,
-            activity_json TEXT NOT NULL,
-            derived_at TEXT NOT NULL,
-            UNIQUE(query_fingerprint, activity_id)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_activities_query
-        ON activities(query_fingerprint, start_timestamp);
-
-        CREATE TABLE IF NOT EXISTS patterns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            query_fingerprint TEXT NOT NULL,
-            pattern_kind TEXT NOT NULL,
-            pattern_key TEXT NOT NULL,
-            derivation_version TEXT NOT NULL,
-            input_fingerprint TEXT NOT NULL,
-            workspace TEXT,
-            observation_mode TEXT,
-            days INTEGER,
-            label TEXT NOT NULL,
-            score REAL NOT NULL,
-            support_json TEXT NOT NULL,
-            pattern_json TEXT NOT NULL,
-            derived_at TEXT NOT NULL,
-            UNIQUE(query_fingerprint, pattern_kind, pattern_key)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_patterns_query
-        ON patterns(query_fingerprint, pattern_kind, pattern_key);
         """
     )
 
@@ -230,17 +179,32 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
     _create_base_schema(connection)
 
 
+def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+    # v4 stores occurred_at as fixed-width UTC so that SQL string comparison
+    # matches time order. Earlier rows mixed +00:00 and +09:00 offsets.
+    rows = connection.execute("SELECT id, occurred_at FROM observations").fetchall()
+    for row in rows:
+        normalized = to_storage_timestamp(row["occurred_at"])
+        if normalized and normalized != row["occurred_at"]:
+            connection.execute("UPDATE observations SET occurred_at = ? WHERE id = ?", (normalized, row["id"]))
+    # activities/patterns were caches for the removed report and proposal outputs.
+    connection.execute("DROP TABLE IF EXISTS activities")
+    connection.execute("DROP TABLE IF EXISTS patterns")
+    _create_base_schema(connection)
+
+
 def bootstrap_store(path: Path) -> None:
     with connect_store(path) as connection:
         current_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if current_version not in {0, 1, 2, SCHEMA_VERSION}:
+        if current_version not in {0, 1, 2, 3, SCHEMA_VERSION}:
             raise ValueError(f"Unsupported store schema version: {current_version}")
         if current_version == 1:
             _migrate_v1_to_v2(connection)
+        if current_version in {1, 2}:
             _migrate_v2_to_v3(connection)
-        elif current_version == 2:
-            _migrate_v2_to_v3(connection)
-        else:
+        if current_version in {1, 2, 3}:
+            _migrate_v3_to_v4(connection)
+        if current_version in {0, SCHEMA_VERSION}:
             _create_base_schema(connection)
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -452,7 +416,7 @@ def _replace_observations(
                 observation_kind,
                 event["source"],
                 scope_mode,
-                event["timestamp"],
+                to_storage_timestamp(event["timestamp"]),
                 event["type"],
                 event["summary"],
                 event["confidence"],

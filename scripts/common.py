@@ -79,6 +79,14 @@ def isoformat(value: datetime | str | int | float | None) -> str | None:
     return current.isoformat() if current else None
 
 
+def to_storage_timestamp(value: datetime | str | int | float | None) -> str | None:
+    """Fixed-width UTC string. String order equals time order, so SQL can compare it."""
+    current = ensure_datetime(value)
+    if current is None:
+        return None
+    return current.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+
+
 def isoformat_or_now(value: datetime | str | int | float | None) -> str:
     normalized = ensure_datetime(value) if value is not None else datetime.now().astimezone()
     return normalized.isoformat()

@@ -11,6 +11,7 @@ from typing import Any, TypedDict
 from urllib.parse import urlsplit
 
 from common import ensure_datetime, extract_text, is_within_path, summarize_text
+from request_text import clean_request_text
 
 
 CLAUDE_SOURCE = "claude-history"
@@ -1524,7 +1525,9 @@ def build_claude_logical_packets(records: list[dict[str, Any]], gap_hours: int) 
             synthetic_user_tool_result = record.get("type") == "user" and claude_message_is_tool_result_only(message)
             text = claude_message_text(record.get("message"))
             if record.get("type") == "user" and not synthetic_user_tool_result:
-                user_messages.append(text)
+                text = clean_request_text(text)
+                if text:
+                    user_messages.append(text)
             elif record.get("type") != "user":
                 assistant_messages.append(text)
             if isinstance(message, dict) and isinstance(message.get("content"), list):
@@ -1611,6 +1614,36 @@ def build_claude_logical_packets(records: list[dict[str, Any]], gap_hours: int) 
 
     flush_packet()
     return logical_packets
+
+
+def codex_user_message_text(record: dict[str, Any]) -> str | None:
+    """Text the user typed in this Codex record, or None when the record is not a user turn.
+
+    Older rollouts write `event_msg/user_message`. Since 2026-11 Codex writes
+    `event_msg/item_completed` with `item.type == "UserMessage"` instead, and
+    `~/.codex/history.jsonl` is no longer updated.
+    """
+    if record.get("type") != "event_msg":
+        return None
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") == "user_message":
+        return clean_request_text(str(payload.get("message") or ""))
+    if payload.get("type") != "item_completed":
+        return None
+    item = payload.get("item")
+    if not isinstance(item, dict) or item.get("type") != "UserMessage":
+        return None
+    content = item.get("content")
+    parts: list[str] = []
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+    elif isinstance(content, str):
+        parts.append(content)
+    return clean_request_text("\n".join(parts))
 
 
 def build_codex_logical_packets(
@@ -1735,9 +1768,9 @@ def build_codex_logical_packets(
         payload = record.get("payload", {})
         payload_type = payload.get("type") if isinstance(payload, dict) else None
 
-        if record_type == "event_msg" and isinstance(payload, dict) and payload.get("type") == "user_message":
+        message = codex_user_message_text(record)
+        if message is not None:
             ensure_packet_boundary(current_timestamp)
-            message = str(payload.get("message") or "")
             if not message:
                 continue
             if packet["timestamps"] and packet["has_non_user_activity"]:

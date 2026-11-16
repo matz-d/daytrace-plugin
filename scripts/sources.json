@@ -32,7 +32,7 @@
     "supports_date_range": true,
     "supports_all_sessions": true,
     "scope_mode": "all-day",
-    "prerequisites": [{"type": "all_paths_exist", "paths": ["~/.codex/history.jsonl", "~/.codex/sessions"]}],
+    "prerequisites": [{"type": "path_exists", "path": "~/.codex/sessions"}],
     "confidence_category": "ai_history"
   },
   {
